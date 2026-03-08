@@ -429,6 +429,17 @@
             <div id="conn-feedback" class="feedback"></div>
           </div>
 
+          <!-- Remote Connectivity Test -->
+          <div class="sub-section" style="margin-top:24px">
+            <h3>🔍 Remote Connectivity Test</h3>
+            <p class="panel-desc">Test whether the selected connection's services are reachable.</p>
+            <div style="display:flex;gap:8px;margin-bottom:12px">
+              <button class="btn btn-primary" onclick="testRemoteConnectivity()" id="btn-remote-test">🔍 Test Connectivity</button>
+              <button class="btn btn-sm" onclick="refreshRemoteData()">↻ Refresh Remote Data</button>
+            </div>
+            <div id="remote-test-results"></div>
+          </div>
+
           <div id="discover-results" style="display:none;margin-top:24px">
             <h3>📡 Discovered Gateways</h3>
             <div id="discover-list" class="conn-list"></div>

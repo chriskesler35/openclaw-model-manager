@@ -1031,6 +1031,75 @@ table.model-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   margin: 0;
 }
 
+/* ── Remote Test Results ──────────────────────────────────────────────────── */
+.remote-test-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.rt-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  border-left: 4px solid var(--border);
+}
+.rt-card-ok { border-left-color: var(--success); }
+.rt-card-fail { border-left-color: var(--danger); }
+.rt-card-warn { border-left-color: var(--warning); }
+
+.rt-icon { font-size: 22px; flex-shrink: 0; margin-top: 1px; }
+.rt-body { flex: 1; min-width: 0; }
+.rt-title { font-weight: 600; font-size: 14px; margin-bottom: 2px; }
+.rt-hint { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-top: 4px; }
+.rt-url { font-size: 11px; font-family: var(--mono); color: var(--text-label); margin-top: 2px; }
+.rt-actions { flex-shrink: 0; }
+
+.rt-expand-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-top: 6px;
+}
+.rt-expand-btn:hover { border-color: var(--accent); color: var(--text); }
+
+.rt-raw {
+  margin-top: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-height: 200px;
+  overflow: auto;
+}
+.rt-raw pre {
+  padding: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+.rt-summary {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rt-summary-ok { background: var(--success-bg); color: var(--success); border: 1px solid rgba(52,211,153,0.2); }
+.rt-summary-partial { background: var(--warning-bg); color: var(--warning); border: 1px solid rgba(251,191,36,0.2); }
+.rt-summary-fail { background: var(--danger-bg); color: var(--danger); border: 1px solid rgba(248,113,113,0.2); }
+
 /* ── Remote Hint ──────────────────────────────────────────────────────────── */
 .remote-hint {
   padding: 10px 14px;

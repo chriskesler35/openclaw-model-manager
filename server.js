@@ -1324,6 +1324,139 @@ app.get('/api/gateway/sessions', async (req, res) => {
   }
 });
 
+// ── Remote Connectivity Test ─────────────────────────────────────────────────
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...opts, signal: controller.signal });
+    clearTimeout(timer);
+    return res;
+  } catch (e) {
+    clearTimeout(timer);
+    throw e;
+  }
+}
+
+app.get('/api/:connId/remote-test', async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+
+  if (conn.type === 'local') {
+    // For local, just confirm everything is reachable locally
+    const start = Date.now();
+    const results = { gateway: null, mm: null, ollama: null };
+
+    // Gateway
+    try {
+      const r = await fetchWithTimeout(`http://127.0.0.1:${conn.port || 18789}/health`, {}, 3000);
+      results.gateway = { ok: r.ok, status: r.status, hint: r.ok ? 'Gateway is running' : 'Gateway returned non-OK status' };
+    } catch (e) {
+      results.gateway = { ok: false, error: e.message, hint: 'Gateway is not running or not reachable on port ' + (conn.port || 18789) };
+    }
+
+    // Model Manager (self)
+    results.mm = { ok: true, hint: 'You are using the local Model Manager right now' };
+
+    // Ollama
+    try {
+      const r = await fetchWithTimeout('http://127.0.0.1:11434/api/tags', {}, 3000);
+      if (r.ok) {
+        const data = await r.json();
+        results.ollama = { ok: true, modelsCount: data.models?.length || 0, hint: `Ollama is running with ${data.models?.length || 0} models installed` };
+      } else {
+        results.ollama = { ok: false, status: r.status, hint: 'Ollama returned non-OK status' };
+      }
+    } catch (e) {
+      results.ollama = { ok: false, error: e.message, hint: 'Ollama is not running on port 11434' };
+    }
+
+    return res.json({ ok: true, data: results, timeMs: Date.now() - start });
+  }
+
+  // Remote connection
+  const proto = conn.tls ? 'https' : 'http';
+  const headers = conn.token ? { 'Authorization': `Bearer ${conn.token}` } : {};
+  const gwPort = conn.port || 18789;
+  const mmPort = conn.mmPort || 18800;
+  const ollamaPort = conn.ollamaPort || 11434;
+  const start = Date.now();
+
+  // Run all three tests in parallel
+  const [gwResult, mmResult, ollamaResult] = await Promise.allSettled([
+    // Gateway health
+    (async () => {
+      try {
+        const r = await fetchWithTimeout(`${proto}://${conn.host}:${gwPort}/health`, { headers }, 5000);
+        let body = null;
+        try { body = await r.json(); } catch { try { body = await r.text(); } catch {} }
+        if (r.ok) return { ok: true, url: `${proto}://${conn.host}:${gwPort}`, status: r.status, body, hint: 'Gateway is running and responding' };
+        return { ok: false, url: `${proto}://${conn.host}:${gwPort}`, status: r.status, body, hint: `Gateway returned HTTP ${r.status}. Check auth token or gateway config.` };
+      } catch (e) {
+        const isTimeout = e.name === 'AbortError';
+        return {
+          ok: false, url: `${proto}://${conn.host}:${gwPort}`,
+          error: e.message,
+          hint: isTimeout
+            ? `Gateway at ${conn.host}:${gwPort} timed out. Check: 1) Is the gateway running? 2) Is the port open in the firewall? 3) Is the host reachable?`
+            : `Cannot connect to gateway at ${conn.host}:${gwPort}: ${e.message}`
+        };
+      }
+    })(),
+
+    // Model Manager
+    (async () => {
+      try {
+        const r = await fetchWithTimeout(`${proto}://${conn.host}:${mmPort}/api/system/info`, {}, 5000);
+        if (r.ok) {
+          const data = await r.json();
+          return { ok: true, url: `${proto}://${conn.host}:${mmPort}`, info: data, hint: 'Remote Model Manager is running — full system stats available' };
+        }
+        return { ok: false, url: `${proto}://${conn.host}:${mmPort}`, status: r.status, hint: `Model Manager returned HTTP ${r.status}. It may be running but returning errors.` };
+      } catch (e) {
+        const isTimeout = e.name === 'AbortError';
+        return {
+          ok: false, url: `${proto}://${conn.host}:${mmPort}`,
+          error: e.message,
+          hint: isTimeout
+            ? `Model Manager at ${conn.host}:${mmPort} timed out. Run "node server.js" on the remote machine to start it.`
+            : `Model Manager not reachable at ${conn.host}:${mmPort}. To set up: git clone, npm install, node server.js`
+        };
+      }
+    })(),
+
+    // Ollama
+    (async () => {
+      try {
+        const r = await fetchWithTimeout(`http://${conn.host}:${ollamaPort}/api/tags`, {}, 5000);
+        if (r.ok) {
+          const data = await r.json();
+          return { ok: true, url: `http://${conn.host}:${ollamaPort}`, modelsCount: data.models?.length || 0, hint: `Ollama is running with ${data.models?.length || 0} models installed` };
+        }
+        return { ok: false, url: `http://${conn.host}:${ollamaPort}`, status: r.status, hint: `Ollama returned HTTP ${r.status}` };
+      } catch (e) {
+        const isTimeout = e.name === 'AbortError';
+        return {
+          ok: false, url: `http://${conn.host}:${ollamaPort}`,
+          error: e.message,
+          hint: isTimeout
+            ? `Ollama at ${conn.host}:${ollamaPort} timed out. Check if Ollama is running and the port is open.`
+            : `Ollama not reachable at ${conn.host}:${ollamaPort}: ${e.message}`
+        };
+      }
+    })(),
+  ]);
+
+  const results = {
+    gateway: gwResult.status === 'fulfilled' ? gwResult.value : { ok: false, error: gwResult.reason?.message, hint: 'Gateway test failed unexpectedly' },
+    mm: mmResult.status === 'fulfilled' ? mmResult.value : { ok: false, error: mmResult.reason?.message, hint: 'Model Manager test failed unexpectedly' },
+    ollama: ollamaResult.status === 'fulfilled' ? ollamaResult.value : { ok: false, error: ollamaResult.reason?.message, hint: 'Ollama test failed unexpectedly' },
+  };
+
+  res.json({ ok: true, data: results, timeMs: Date.now() - start });
+});
+
 // ── Gateway Discover (Bonjour/mDNS) ─────────────────────────────────────────
 
 app.get('/api/discover', async (req, res) => {

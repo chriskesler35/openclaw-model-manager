@@ -1372,6 +1372,125 @@ async function setDefaultConn(id) {
   toast('Default updated', 'success');
 }
 
+// ── Remote Connectivity Test ─────────────────────────────────────────────────
+
+async function testRemoteConnectivity() {
+  const btn = byId('btn-remote-test');
+  const container = byId('remote-test-results');
+  if (!container) return;
+
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Testing…';
+  container.innerHTML = '<div class="empty-state"><span class="spinner"></span> Testing remote connectivity… this may take a few seconds</div>';
+
+  try {
+    const res = await capi('GET', '/remote-test');
+    if (!res.ok) {
+      container.innerHTML = `<div class="empty-state" style="color:var(--danger)">${esc(res.error || 'Test failed')}</div>`;
+      btn.innerHTML = orig;
+      btn.disabled = false;
+      return;
+    }
+
+    const { gateway, mm, ollama } = res.data;
+    const timeMs = res.timeMs;
+    const okCount = [gateway, mm, ollama].filter(t => t?.ok).length;
+    const totalCount = 3;
+
+    // Summary banner
+    let summaryClass, summaryText;
+    if (okCount === totalCount) {
+      summaryClass = 'rt-summary-ok';
+      summaryText = `✅ All ${totalCount} services reachable — full remote management available`;
+    } else if (okCount > 0) {
+      summaryClass = 'rt-summary-partial';
+      summaryText = `⚠️ ${okCount} of ${totalCount} services reachable — some features will be limited`;
+    } else {
+      summaryClass = 'rt-summary-fail';
+      summaryText = `❌ No remote services reachable — check network, firewall, and service status`;
+    }
+
+    let html = `<div class="rt-summary ${summaryClass}">${summaryText} <span style="margin-left:auto;font-size:11px;opacity:0.7">${timeMs}ms</span></div>`;
+    html += '<div class="remote-test-grid">';
+
+    // Render each test result
+    const tests = [
+      { key: 'gateway', label: 'OpenClaw Gateway', icon: '🔌', data: gateway },
+      { key: 'mm', label: 'Model Manager', icon: '⚡', data: mm },
+      { key: 'ollama', label: 'Ollama', icon: '🦙', data: ollama },
+    ];
+
+    for (const t of tests) {
+      const d = t.data || {};
+      const ok = d.ok;
+      const cardClass = ok ? 'rt-card-ok' : 'rt-card-fail';
+      const statusIcon = ok ? '✅' : '❌';
+      const statusText = ok ? 'Reachable' : 'Unreachable';
+
+      // Extra info for successful tests
+      let extraHtml = '';
+      if (ok && t.key === 'ollama' && d.modelsCount != null) {
+        extraHtml = `<div style="font-size:12px;margin-top:4px;color:var(--success)">${d.modelsCount} model${d.modelsCount !== 1 ? 's' : ''} installed</div>`;
+      }
+      if (ok && t.key === 'mm' && d.info?.data) {
+        const info = d.info.data;
+        const gpuText = info.gpus?.length ? `${info.gpus.length} GPU${info.gpus.length > 1 ? 's' : ''}` : 'No GPU';
+        const ramText = info.ram ? `${Math.round(info.ram.totalMB / 1024)} GB RAM` : '';
+        extraHtml = `<div style="font-size:12px;margin-top:4px;color:var(--success)">${gpuText}${ramText ? ' • ' + ramText : ''}</div>`;
+      }
+
+      const rawId = `rt-raw-${t.key}`;
+
+      html += `<div class="rt-card ${cardClass}">
+        <span class="rt-icon">${t.icon}</span>
+        <div class="rt-body">
+          <div class="rt-title">${statusIcon} ${esc(t.label)} — ${statusText}</div>
+          ${d.url ? `<div class="rt-url">${esc(d.url)}</div>` : ''}
+          <div class="rt-hint">${esc(d.hint || '')}</div>
+          ${extraHtml}
+          <button class="rt-expand-btn" onclick="toggleRtRaw('${rawId}')">📋 Raw Data</button>
+          <div id="${rawId}" class="rt-raw" style="display:none">
+            <pre>${esc(JSON.stringify(d, null, 2))}</pre>
+          </div>
+        </div>
+        <div class="rt-actions">
+          <button class="btn btn-sm" onclick="retrySingleTest('${t.key}')" title="Retry this test">↻</button>
+        </div>
+      </div>`;
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = `<div class="empty-state" style="color:var(--danger)">Error: ${esc(e.message)}</div>`;
+  }
+
+  btn.innerHTML = orig;
+  btn.disabled = false;
+}
+
+function toggleRtRaw(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function retrySingleTest(key) {
+  // Re-run the full test (individual retry would need a separate endpoint)
+  toast(`Retrying ${key} test…`, 'info');
+  await testRemoteConnectivity();
+}
+
+async function refreshRemoteData() {
+  toast('Refreshing all data for current connection…', 'info');
+  refreshAll();
+  const activeTab = document.querySelector('.tab.active')?.dataset?.tab;
+  if (activeTab === 'health') { refreshHealth(); refreshSystemStats(); }
+  if (activeTab === 'local') refreshLocalModels();
+  if (activeTab === 'auth') refreshCredentials();
+  if (activeTab === 'connections') renderConnList();
+}
+
 // ── Gateway Discovery ────────────────────────────────────────────────────────
 
 async function discoverGateways() {
