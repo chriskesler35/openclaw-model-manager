@@ -117,6 +117,13 @@ function switchConnection() {
   activeConnId = byId('conn-select').value;
   updateConnTypeBadge();
   refreshAll();
+
+  // Refresh the currently visible tab's data
+  const activeTab = document.querySelector('.tab.active')?.dataset?.tab;
+  if (activeTab === 'health') { refreshHealth(); refreshSystemStats(); }
+  if (activeTab === 'local') refreshLocalModels();
+  if (activeTab === 'auth') refreshCredentials();
+  if (activeTab === 'connections') renderConnList();
 }
 
 function updateConnTypeBadge() {
