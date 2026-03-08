@@ -88,6 +88,7 @@ function switchTab(tabId) {
 
   // Lazy-load data for tabs
   if (tabId === 'health') refreshHealth();
+  if (tabId === 'fallbacks') refreshFallbacks();
   if (tabId === 'local') refreshLocalModels();
   if (tabId === 'connections') renderConnList();
   if (tabId === 'auth') refreshCredentials();
@@ -502,56 +503,226 @@ function quickSet(model) {
 
 // ── Fallbacks ────────────────────────────────────────────────────────────────
 
+let fallbackList = [];        // Current working list (may have unsaved changes)
+let fallbackOriginal = [];    // Last-saved state from server
+let allAvailableModels = [];  // Full model list for the dropdown
+let dragSrcIndex = null;
+
 async function refreshFallbacks() {
-  const container = byId('fallback-list');
-  try {
-    const res = await capi('GET', '/models/fallbacks');
-    if (res.ok && res.data) {
-      const list = Array.isArray(res.data) ? res.data : (res.data.fallbacks || []);
-      if (list.length === 0) {
-        container.innerHTML = '<div class="empty-state">No fallbacks configured. Add models below — they\'ll be tried in order if the primary fails.</div>';
-        return;
-      }
-      container.innerHTML = list.map((f, i) => {
-        const model = typeof f === 'string' ? f : (f.model || f.id || f);
-        return `<div class="item-row">
-          <div style="display:flex;align-items:center">
-            <span class="item-order">${i + 1}.</span>
-            <span class="item-label">${esc(model)}</span>
-          </div>
-          <button class="btn-remove" onclick="removeFallback('${esc(model)}')" title="Remove">✕</button>
-        </div>`;
-      }).join('');
-    } else {
-      container.innerHTML = '<div class="empty-state">No fallbacks configured</div>';
+  const container = byId('fallback-tiles');
+
+  // Load fallbacks and available models in parallel
+  const [fbRes, modRes] = await Promise.all([
+    capi('GET', '/models/fallbacks'),
+    capi('GET', '/models/available'),
+  ]);
+
+  // Parse fallbacks
+  if (fbRes.ok && fbRes.data) {
+    const list = Array.isArray(fbRes.data) ? fbRes.data : (fbRes.data.fallbacks || []);
+    fallbackList = list.map(f => typeof f === 'string' ? f : (f.model || f.id || f));
+    fallbackOriginal = [...fallbackList];
+  }
+
+  // Parse available models
+  if (modRes.ok && modRes.models) {
+    allAvailableModels = modRes.models;
+  }
+
+  renderFallbackTiles();
+  populateFallbackDropdown();
+  updateFallbackDirty();
+}
+
+function renderFallbackTiles() {
+  const container = byId('fallback-tiles');
+  if (!container) return;
+
+  if (fallbackList.length === 0) {
+    container.innerHTML = '<div class="empty-state">No fallbacks configured. Add models from the dropdown below — they\'ll be tried in order if the primary fails.</div>';
+    return;
+  }
+
+  container.innerHTML = fallbackList.map((model, i) => {
+    const info = allAvailableModels.find(m => m.key === model);
+    const displayName = info?.name || model;
+    const isLocal = info?.local || model.startsWith('ollama/');
+    const provider = model.split('/')[0];
+
+    return `<div class="fallback-tile" draggable="true" data-index="${i}"
+                 ondragstart="fbDragStart(event, ${i})"
+                 ondragover="fbDragOver(event)"
+                 ondragenter="fbDragEnter(event)"
+                 ondragleave="fbDragLeave(event)"
+                 ondrop="fbDrop(event, ${i})"
+                 ondragend="fbDragEnd(event)">
+      <span class="ft-grip">⠿</span>
+      <span class="ft-order">${i + 1}</span>
+      <div class="ft-info">
+        <div class="ft-model">${esc(displayName)}</div>
+        <div class="ft-meta">
+          <span class="ft-badge ${isLocal ? 'ft-badge-local' : 'ft-badge-external'}">${isLocal ? '💻 Local' : '☁️ ' + esc(provider)}</span>
+          <span style="margin-left:6px;color:var(--text-label)">${esc(model)}</span>
+        </div>
+      </div>
+      <button class="ft-remove" onclick="removeFallbackTile(${i})" title="Remove from fallback chain">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function populateFallbackDropdown() {
+  const select = byId('fallback-add-select');
+  if (!select) return;
+
+  // Group models by provider, exclude ones already in fallback list
+  const inFallbacks = new Set(fallbackList);
+  const available = allAvailableModels.filter(m => !inFallbacks.has(m.key));
+
+  // Group by provider
+  const groups = {};
+  for (const m of available) {
+    const provider = m.key.split('/')[0];
+    if (!groups[provider]) groups[provider] = [];
+    groups[provider].push(m);
+  }
+
+  let html = '<option value="">Select a model to add…</option>';
+
+  // Local models first
+  if (groups['ollama']?.length) {
+    html += '<optgroup label="💻 Local (Ollama)">';
+    for (const m of groups['ollama']) {
+      html += `<option value="${esc(m.key)}">${esc(m.name || m.key)}</option>`;
     }
-  } catch { container.innerHTML = '<div class="empty-state">Error loading fallbacks</div>'; }
+    html += '</optgroup>';
+    delete groups['ollama'];
+  }
+
+  // External providers
+  for (const [provider, models] of Object.entries(groups).sort()) {
+    html += `<optgroup label="☁️ ${esc(provider)}">`;
+    for (const m of models) {
+      html += `<option value="${esc(m.key)}">${esc(m.name || m.key)}</option>`;
+    }
+    html += '</optgroup>';
+  }
+
+  select.innerHTML = html;
 }
 
-async function addFallback() {
-  const input = byId('fallback-input');
-  const model = input.value.trim();
-  if (!model) return;
-  try {
-    const res = await capi('POST', '/models/fallbacks', { model });
-    if (res.ok) { toast(`Fallback added: ${model}`, 'success'); input.value = ''; refreshFallbacks(); }
-    else feedback('fallback-feedback', res.error, 'error');
-  } catch (e) { feedback('fallback-feedback', e.message, 'error'); }
+function addFallbackFromDropdown() {
+  const select = byId('fallback-add-select');
+  const model = select?.value;
+  if (!model) return feedback('fallback-feedback', 'Select a model first', 'error');
+
+  if (fallbackList.includes(model)) {
+    return feedback('fallback-feedback', 'Model already in fallback chain', 'error');
+  }
+
+  fallbackList.push(model);
+  renderFallbackTiles();
+  populateFallbackDropdown();
+  updateFallbackDirty();
+  select.value = '';
 }
 
-async function removeFallback(model) {
+function removeFallbackTile(index) {
+  fallbackList.splice(index, 1);
+  renderFallbackTiles();
+  populateFallbackDropdown();
+  updateFallbackDirty();
+}
+
+// Drag & Drop handlers
+function fbDragStart(e, index) {
+  dragSrcIndex = index;
+  e.target.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', index);
+}
+
+function fbDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+}
+
+function fbDragEnter(e) {
+  e.preventDefault();
+  const tile = e.target.closest('.fallback-tile');
+  if (tile) tile.classList.add('drag-over');
+}
+
+function fbDragLeave(e) {
+  const tile = e.target.closest('.fallback-tile');
+  if (tile) tile.classList.remove('drag-over');
+}
+
+function fbDrop(e, targetIndex) {
+  e.preventDefault();
+  const tile = e.target.closest('.fallback-tile');
+  if (tile) tile.classList.remove('drag-over');
+
+  if (dragSrcIndex === null || dragSrcIndex === targetIndex) return;
+
+  // Reorder
+  const [moved] = fallbackList.splice(dragSrcIndex, 1);
+  fallbackList.splice(targetIndex, 0, moved);
+
+  renderFallbackTiles();
+  updateFallbackDirty();
+}
+
+function fbDragEnd(e) {
+  dragSrcIndex = null;
+  document.querySelectorAll('.fallback-tile').forEach(t => {
+    t.classList.remove('dragging', 'drag-over');
+  });
+}
+
+function updateFallbackDirty() {
+  const isDirty = JSON.stringify(fallbackList) !== JSON.stringify(fallbackOriginal);
+  const badge = byId('fallback-dirty-badge');
+  const btn = byId('btn-save-fallbacks');
+  if (badge) badge.style.display = isDirty ? 'inline' : 'none';
+  if (btn) btn.style.display = isDirty ? 'inline-flex' : 'none';
+}
+
+async function saveFallbacks() {
+  const btn = byId('btn-save-fallbacks');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Saving…';
+
   try {
-    const res = await capi('DELETE', `/models/fallbacks/${encodeURIComponent(model)}`);
-    if (res.ok) { toast('Fallback removed', 'info'); refreshFallbacks(); }
-    else toast(res.error, 'error');
-  } catch (e) { toast(e.message, 'error'); }
+    const res = await capi('PUT', '/models/fallbacks', { fallbacks: fallbackList });
+    if (res.ok) {
+      fallbackOriginal = [...fallbackList];
+      updateFallbackDirty();
+      toast('✅ Fallback chain saved! Restart the gateway for changes to take effect.', 'success');
+      feedback('fallback-feedback', '✅ ' + res.message + ' — ' + res.warning, 'success');
+    } else {
+      feedback('fallback-feedback', '❌ ' + (res.error || 'Save failed'), 'error');
+    }
+  } catch (e) {
+    feedback('fallback-feedback', '❌ ' + e.message, 'error');
+  }
+
+  btn.innerHTML = orig;
+  btn.disabled = false;
 }
 
 async function clearFallbacks() {
-  if (!confirm('Clear all fallbacks?')) return;
+  if (!confirm('Clear all fallbacks? This will save immediately.')) return;
   try {
     const res = await capi('DELETE', '/models/fallbacks');
-    if (res.ok) { toast('Fallbacks cleared', 'info'); refreshFallbacks(); }
+    if (res.ok) {
+      fallbackList = [];
+      fallbackOriginal = [];
+      renderFallbackTiles();
+      populateFallbackDropdown();
+      updateFallbackDirty();
+      toast('Fallbacks cleared', 'info');
+    }
   } catch (e) { toast(e.message, 'error'); }
 }
 

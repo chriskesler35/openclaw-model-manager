@@ -229,17 +229,38 @@
       <section class="tab-panel" id="panel-fallbacks">
         <div class="panel-header">
           <h2>Fallback Chain</h2>
-          <button class="btn btn-sm btn-danger" onclick="clearFallbacks()">Clear All</button>
+          <div class="header-controls">
+            <span id="fallback-dirty-badge" class="dirty-badge" style="display:none">● Unsaved changes</span>
+            <button class="btn btn-sm btn-success" id="btn-save-fallbacks" onclick="saveFallbacks()" style="display:none">💾 Save Changes</button>
+            <button class="btn btn-sm btn-danger" onclick="clearFallbacks()">Clear All</button>
+          </div>
         </div>
         <div class="panel-content">
-          <p class="panel-desc">When the primary model fails, OpenClaw tries these in order.</p>
-          <div id="fallback-list" class="item-list">
+          <p class="panel-desc">When the primary model fails, OpenClaw tries these in order. <strong>Drag tiles to reorder.</strong></p>
+          
+          <div class="gateway-warning" style="margin-bottom:16px">
+            <span class="warning-icon">⚠️</span>
+            <div>
+              <strong>Saving changes will update the config file.</strong> The gateway needs to be restarted for changes to take effect. If the gateway is handling an active conversation, <strong>wait until it finishes</strong> before restarting.
+            </div>
+          </div>
+
+          <!-- Drag & drop fallback tiles -->
+          <div id="fallback-tiles" class="fallback-tiles">
             <div class="empty-state">Loading…</div>
           </div>
-          <div class="input-group">
-            <input type="text" id="fallback-input" placeholder="Add fallback model…" autocomplete="off">
-            <button class="btn btn-primary" onclick="addFallback()">Add</button>
+
+          <!-- Add from dropdown -->
+          <div class="sub-section" style="margin-top:20px">
+            <h3>➕ Add to Fallback Chain</h3>
+            <div class="fallback-add-row">
+              <select id="fallback-add-select" class="fallback-select">
+                <option value="">Select a model to add…</option>
+              </select>
+              <button class="btn btn-primary" onclick="addFallbackFromDropdown()">Add</button>
+            </div>
           </div>
+
           <div id="fallback-feedback" class="feedback"></div>
         </div>
       </section>

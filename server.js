@@ -482,6 +482,63 @@ app.delete('/api/:connId/models/fallbacks', async (req, res) => {
   }
 });
 
+// Save entire fallback list (reorder/bulk edit)
+app.put('/api/:connId/models/fallbacks', async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (conn.type !== 'local') return res.status(501).json({ ok: false, error: 'Not supported remotely' });
+
+  const { fallbacks } = req.body;
+  if (!Array.isArray(fallbacks)) return res.status(400).json({ ok: false, error: 'fallbacks must be an array' });
+
+  try {
+    const config = readJsonFile(OPENCLAW_CONFIG);
+    if (!config) return res.status(500).json({ ok: false, error: 'Could not read config' });
+
+    if (!config.agents?.defaults?.model) {
+      config.agents = config.agents || {};
+      config.agents.defaults = config.agents.defaults || {};
+      config.agents.defaults.model = config.agents.defaults.model || {};
+    }
+    config.agents.defaults.model.fallbacks = fallbacks;
+    writeJsonFile(OPENCLAW_CONFIG, config);
+
+    res.json({
+      ok: true,
+      message: `Fallback chain updated (${fallbacks.length} models)`,
+      warning: 'The gateway needs to be restarted for changes to take effect. If a conversation is active, wait until it finishes.',
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Get all available models (for fallback dropdown)
+app.get('/api/:connId/models/available', async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+
+  try {
+    if (conn.type === 'local') {
+      const raw = await run('openclaw models list --json', 15000);
+      const parsed = tryJsonParse(raw);
+      const models = (parsed?.models || []).map(m => ({
+        key: m.key,
+        name: m.name || m.key,
+        local: m.local || false,
+        tags: m.tags || [],
+      }));
+      res.json({ ok: true, models });
+    } else {
+      const result = await gatewayRpc(conn, 'models.status', {}, 10000);
+      const allowed = result?.allowed || [];
+      res.json({ ok: true, models: allowed.map(m => ({ key: m, name: m, local: false, tags: [] })) });
+    }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ── Auth Profiles ────────────────────────────────────────────────────────────
 
 app.get('/api/:connId/auth/profiles', async (req, res) => {
