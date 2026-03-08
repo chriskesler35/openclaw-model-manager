@@ -1309,64 +1309,63 @@ function broadcastStatus() {
 
   for (const conn of data.connections) {
     if (conn.type === 'local') {
-      // Fast check: probe the gateway WebSocket directly instead of shelling out
-      // (openclaw gateway status --json takes ~6s due to RPC probe + scheduled task query)
-      const probe = new WebSocket('ws://127.0.0.1:' + (conn.port || 18789), { handshakeTimeout: 2000 });
-      const timer = setTimeout(() => { try { probe.close(); } catch {} }, 3000);
+      // Use HTTP /health endpoint instead of raw WS connect/disconnect
+      // (WS probe causes "closed before connect" spam in gateway logs)
+      const port = conn.port || 18789;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3000);
 
-      probe.on('open', () => {
-        clearTimeout(timer);
-        const payload = JSON.stringify({
-          type: 'gateway-status', connId: conn.id,
-          data: { running: true, rpc: { ok: true }, port: { status: 'busy' }, gateway: { bindHost: '0.0.0.0', port: conn.port || 18789 } }
+      fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
+        .then(r => {
+          clearTimeout(timer);
+          const payload = JSON.stringify({
+            type: 'gateway-status', connId: conn.id,
+            data: { running: r.ok, rpc: { ok: r.ok }, port: { status: 'busy' }, gateway: { bindHost: '0.0.0.0', port } }
+          });
+          for (const client of wss.clients) {
+            if (client.readyState === 1) client.send(payload);
+          }
+        })
+        .catch(() => {
+          clearTimeout(timer);
+          const payload = JSON.stringify({
+            type: 'gateway-status', connId: conn.id,
+            data: { running: false }
+          });
+          for (const client of wss.clients) {
+            if (client.readyState === 1) client.send(payload);
+          }
         });
-        for (const client of wss.clients) {
-          if (client.readyState === 1) client.send(payload);
-        }
-        try { probe.close(); } catch {}
-      });
-
-      probe.on('error', () => {
-        clearTimeout(timer);
-        const payload = JSON.stringify({
-          type: 'gateway-status', connId: conn.id,
-          data: { running: false }
-        });
-        for (const client of wss.clients) {
-          if (client.readyState === 1) client.send(payload);
-        }
-      });
     } else {
-      // Remote: quick WebSocket ping
-      const proto = conn.tls ? 'wss' : 'ws';
-      const url = `${proto}://${conn.host}:${conn.port}`;
-      const probe = new WebSocket(url, {
+      // Remote: use HTTP /health to avoid WS log spam on remote gateway too
+      const proto = conn.tls ? 'https' : 'http';
+      const url = `${proto}://${conn.host}:${conn.port}/health`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+
+      fetch(url, {
+        signal: controller.signal,
         headers: conn.token ? { 'Authorization': `Bearer ${conn.token}` } : {},
-        handshakeTimeout: 3000,
-      });
-      const timer = setTimeout(() => { try { probe.close(); } catch {} }, 4000);
-
-      probe.on('open', () => {
-        clearTimeout(timer);
-        const payload = JSON.stringify({
-          type: 'gateway-status', connId: conn.id,
-          data: { running: true, host: conn.host, port: conn.port }
-        });
-        for (const client of wss.clients) {
-          if (client.readyState === 1) client.send(payload);
-        }
-        try { probe.close(); } catch {}
-      });
-
-      probe.on('error', () => {
-        clearTimeout(timer);
-        const payload = JSON.stringify({
-          type: 'gateway-status', connId: conn.id,
-          data: { running: false, host: conn.host, port: conn.port }
-        });
-        for (const client of wss.clients) {
-          if (client.readyState === 1) client.send(payload);
-        }
+      })
+        .then(r => {
+          clearTimeout(timer);
+          const payload = JSON.stringify({
+            type: 'gateway-status', connId: conn.id,
+            data: { running: r.ok, host: conn.host, port: conn.port }
+          });
+          for (const client of wss.clients) {
+            if (client.readyState === 1) client.send(payload);
+          }
+        })
+        .catch(() => {
+          clearTimeout(timer);
+          const payload = JSON.stringify({
+            type: 'gateway-status', connId: conn.id,
+            data: { running: false, host: conn.host, port: conn.port }
+          });
+          for (const client of wss.clients) {
+            if (client.readyState === 1) client.send(payload);
+          }
       });
     }
   }
