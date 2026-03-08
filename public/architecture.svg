@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 720" font-family="'Segoe UI', system-ui, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto">
+      <polygon points="0 0, 8 3.5, 0 7" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto">
+      <polygon points="0 0, 8 3.5, 0 7" fill="#6366f1"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto">
+      <polygon points="0 0, 8 3.5, 0 7" fill="#22c55e"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto">
+      <polygon points="0 0, 8 3.5, 0 7" fill="#f97316"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="rgba(0,0,0,0.4)"/>
+    </filter>
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f1117"/>
+      <stop offset="100%" stop-color="#13151f"/>
+    </linearGradient>
+    <linearGradient id="server-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="100%" stop-color="#1a1740"/>
+    </linearGradient>
+    <linearGradient id="browser-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#1a2234"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1100" height="720" fill="url(#bg-grad)" rx="12"/>
+
+  <!-- Title -->
+  <text x="550" y="42" text-anchor="middle" font-size="20" font-weight="700" fill="#f1f5f9">OpenClaw Model Manager — Architecture</text>
+  <text x="550" y="62" text-anchor="middle" font-size="12" fill="#64748b">How the dashboard connects to your OpenClaw infrastructure</text>
+
+  <!-- ─── BROWSER ─────────────────────────────── -->
+  <rect x="350" y="85" width="400" height="90" rx="10" fill="url(#browser-grad)" stroke="#334155" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="550" y="108" text-anchor="middle" font-size="11" font-weight="600" fill="#94a3b8" letter-spacing="1">BROWSER</text>
+  <text x="550" y="130" text-anchor="middle" font-size="15" font-weight="700" fill="#f1f5f9">🖥  Web UI</text>
+  <text x="550" y="150" text-anchor="middle" font-size="11" fill="#64748b">HTML · CSS · JavaScript  (no build step)</text>
+  <text x="550" y="167" text-anchor="middle" font-size="10" fill="#475569">Health · Gateway · Models · Fallbacks · Auth · Local Models · Connections</text>
+
+  <!-- ─── EXPRESS SERVER ─────────────────────── -->
+  <rect x="300" y="245" width="500" height="110" rx="10" fill="url(#server-grad)" stroke="#4f46e5" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="550" y="268" text-anchor="middle" font-size="11" font-weight="600" fill="#818cf8" letter-spacing="1">CORE</text>
+  <text x="550" y="290" text-anchor="middle" font-size="15" font-weight="700" fill="#f1f5f9">⚡  Model Manager Server</text>
+  <text x="550" y="310" text-anchor="middle" font-size="11" fill="#94a3b8">Express · Node.js · port 18800 · binds 0.0.0.0</text>
+  <text x="550" y="330" text-anchor="middle" font-size="10" fill="#6366f1">/api/:connId/* · WebSocket /ws · Static assets</text>
+  <text x="550" y="348" text-anchor="middle" font-size="10" fill="#475569">Runs independently of the gateway  ·  Survives gateway stop/restart</text>
+
+  <!-- Browser ↔ Server arrow (bidirectional) -->
+  <!-- Down arrow -->
+  <line x1="540" y1="175" x2="540" y2="241" stroke="#6366f1" stroke-width="1.5" marker-end="url(#arrow-accent)" stroke-dasharray="4,2"/>
+  <!-- Up arrow -->
+  <line x1="560" y1="241" x2="560" y2="175" stroke="#6366f1" stroke-width="1.5" marker-end="url(#arrow-accent)" stroke-dasharray="4,2"/>
+  <rect x="567" y="196" width="120" height="28" rx="4" fill="#1e1b4b" stroke="#4f46e5" stroke-width="1"/>
+  <text x="627" y="207" text-anchor="middle" font-size="10" fill="#818cf8" font-weight="600">HTTP REST</text>
+  <text x="627" y="219" text-anchor="middle" font-size="10" fill="#818cf8">WebSocket /ws</text>
+
+  <!-- ─── LOCAL SECTION ─────────────────────── -->
+  <!-- Section label -->
+  <rect x="30" y="420" width="460" height="260" rx="10" fill="rgba(15,20,30,0.6)" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="260" y="442" text-anchor="middle" font-size="10" font-weight="700" fill="#334155" letter-spacing="2">LOCAL MACHINE</text>
+
+  <!-- Gateway box -->
+  <rect x="50" y="455" width="200" height="80" rx="8" fill="#0f2318" stroke="#166534" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="150" y="476" text-anchor="middle" font-size="10" font-weight="600" fill="#4ade80" letter-spacing="1">GATEWAY</text>
+  <text x="150" y="496" text-anchor="middle" font-size="13" font-weight="700" fill="#f1f5f9">🔌 OpenClaw</text>
+  <text x="150" y="514" text-anchor="middle" font-size="10" fill="#4ade80">port 18789</text>
+  <text x="150" y="528" text-anchor="middle" font-size="9" fill="#166534">HTTP /health · WS RPC</text>
+
+  <!-- Ollama box -->
+  <rect x="270" y="455" width="200" height="80" rx="8" fill="#1a1200" stroke="#713f12" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="370" y="476" text-anchor="middle" font-size="10" font-weight="600" fill="#fb923c" letter-spacing="1">LOCAL MODELS</text>
+  <text x="370" y="496" text-anchor="middle" font-size="13" font-weight="700" fill="#f1f5f9">🦙 Ollama</text>
+  <text x="370" y="514" text-anchor="middle" font-size="10" fill="#fb923c">port 11434</text>
+  <text x="370" y="528" text-anchor="middle" font-size="9" fill="#713f12">GET /api/tags</text>
+
+  <!-- Config files box -->
+  <rect x="50" y="560" width="420" height="100" rx="8" fill="#171717" stroke="#2d2d2d" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="260" y="581" text-anchor="middle" font-size="10" font-weight="600" fill="#737373" letter-spacing="1">CONFIG FILES</text>
+  <!-- openclaw.json -->
+  <rect x="65" y="588" width="130" height="58" rx="5" fill="#1a1a1a" stroke="#333" stroke-width="1"/>
+  <text x="130" y="605" text-anchor="middle" font-size="10" fill="#a3a3a3" font-weight="600">openclaw.json</text>
+  <text x="130" y="620" text-anchor="middle" font-size="9" fill="#525252">primary model</text>
+  <text x="130" y="632" text-anchor="middle" font-size="9" fill="#525252">fallback chain</text>
+  <text x="130" y="644" text-anchor="middle" font-size="9" fill="#525252">aliases · identity</text>
+  <!-- auth-profiles.json -->
+  <rect x="210" y="588" width="130" height="58" rx="5" fill="#1a1a1a" stroke="#333" stroke-width="1"/>
+  <text x="275" y="605" text-anchor="middle" font-size="10" fill="#a3a3a3" font-weight="600">auth-profiles.json</text>
+  <text x="275" y="620" text-anchor="middle" font-size="9" fill="#525252">API keys (masked)</text>
+  <text x="275" y="632" text-anchor="middle" font-size="9" fill="#525252">cooldown timers</text>
+  <text x="275" y="644" text-anchor="middle" font-size="9" fill="#525252">error counts</text>
+  <!-- connections.json -->
+  <rect x="355" y="588" width="100" height="58" rx="5" fill="#1a1a1a" stroke="#333" stroke-width="1"/>
+  <text x="405" y="605" text-anchor="middle" font-size="10" fill="#a3a3a3" font-weight="600">connections</text>
+  <text x="405" y="617" text-anchor="middle" font-size="9" fill="#525252">.json</text>
+  <text x="405" y="632" text-anchor="middle" font-size="9" fill="#525252">remote hosts</text>
+  <text x="405" y="644" text-anchor="middle" font-size="9" fill="#525252">tokens · ports</text>
+
+  <!-- ─── REMOTE SECTION ─────────────────────── -->
+  <rect x="610" y="420" width="460" height="260" rx="10" fill="rgba(15,20,30,0.6)" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="840" y="442" text-anchor="middle" font-size="10" font-weight="700" fill="#334155" letter-spacing="2">REMOTE MACHINE  (Tailscale / LAN / WAN)</text>
+
+  <!-- Remote Gateway -->
+  <rect x="630" y="455" width="190" height="80" rx="8" fill="#0f2318" stroke="#166534" stroke-width="1.5" filter="url(#shadow)" opacity="0.8"/>
+  <text x="725" y="476" text-anchor="middle" font-size="10" font-weight="600" fill="#4ade80" letter-spacing="1">REMOTE GATEWAY</text>
+  <text x="725" y="496" text-anchor="middle" font-size="13" font-weight="700" fill="#f1f5f9">🔌 OpenClaw</text>
+  <text x="725" y="514" text-anchor="middle" font-size="10" fill="#4ade80">port 18789</text>
+  <text x="725" y="528" text-anchor="middle" font-size="9" fill="#166534">HTTP /health · WS RPC</text>
+
+  <!-- Remote Model Manager -->
+  <rect x="840" y="455" width="200" height="80" rx="8" fill="url(#server-grad)" stroke="#4f46e5" stroke-width="1.5" filter="url(#shadow)" opacity="0.8"/>
+  <text x="940" y="476" text-anchor="middle" font-size="10" font-weight="600" fill="#818cf8" letter-spacing="1">REMOTE MM</text>
+  <text x="940" y="496" text-anchor="middle" font-size="13" font-weight="700" fill="#f1f5f9">⚡ Model Manager</text>
+  <text x="940" y="514" text-anchor="middle" font-size="10" fill="#818cf8">port 18800</text>
+  <text x="940" y="528" text-anchor="middle" font-size="9" fill="#4f46e5">system info · local models</text>
+
+  <!-- Remote Ollama -->
+  <rect x="630" y="560" width="190" height="80" rx="8" fill="#1a1200" stroke="#713f12" stroke-width="1.5" filter="url(#shadow)" opacity="0.8"/>
+  <text x="725" y="581" text-anchor="middle" font-size="10" font-weight="600" fill="#fb923c" letter-spacing="1">REMOTE MODELS</text>
+  <text x="725" y="601" text-anchor="middle" font-size="13" font-weight="700" fill="#f1f5f9">🦙 Ollama</text>
+  <text x="725" y="619" text-anchor="middle" font-size="10" fill="#fb923c">port 11434</text>
+  <text x="725" y="633" text-anchor="middle" font-size="9" fill="#713f12">GET /api/tags</text>
+
+  <!-- ─── ARROWS: Server → Local ─────────────── -->
+
+  <!-- Server → Gateway (CLI shell-out) -->
+  <line x1="400" y1="355" x2="220" y2="452" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <rect x="240" y="378" width="130" height="30" rx="4" fill="#0a0f0a" stroke="#166534" stroke-width="1"/>
+  <text x="305" y="390" text-anchor="middle" font-size="9" fill="#4ade80" font-weight="600">openclaw CLI</text>
+  <text x="305" y="402" text-anchor="middle" font-size="9" fill="#166534">shell exec (local)</text>
+
+  <!-- Server → Ollama -->
+  <line x1="430" y1="355" x2="370" y2="452" stroke="#f97316" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+  <rect x="385" y="385" width="100" height="22" rx="4" fill="#0a0800" stroke="#713f12" stroke-width="1"/>
+  <text x="435" y="400" text-anchor="middle" font-size="9" fill="#fb923c">HTTP :11434</text>
+
+  <!-- Server → Config Files -->
+  <line x1="450" y1="355" x2="300" y2="558" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)" stroke-dasharray="5,2"/>
+  <rect x="310" y="455" width="100" height="22" rx="4" fill="#0d0d0d" stroke="#2d2d2d" stroke-width="1"/>
+  <text x="360" y="470" text-anchor="middle" font-size="9" fill="#64748b">read / write</text>
+
+  <!-- ─── ARROWS: Server → Remote ─────────────── -->
+
+  <!-- Server → Remote Gateway -->
+  <line x1="680" y1="355" x2="720" y2="452" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrow-green)" stroke-dasharray="6,3"/>
+  <rect x="660" y="375" width="120" height="30" rx="4" fill="#0a0f0a" stroke="#166534" stroke-width="1"/>
+  <text x="720" y="387" text-anchor="middle" font-size="9" fill="#4ade80" font-weight="600">HTTP / WS RPC</text>
+  <text x="720" y="399" text-anchor="middle" font-size="9" fill="#166534">Bearer token auth</text>
+
+  <!-- Server → Remote MM -->
+  <line x1="720" y1="355" x2="900" y2="452" stroke="#6366f1" stroke-width="1.5" marker-end="url(#arrow-accent)" stroke-dasharray="6,3"/>
+  <rect x="780" y="375" width="90" height="30" rx="4" fill="#0d0b1e" stroke="#4f46e5" stroke-width="1"/>
+  <text x="825" y="387" text-anchor="middle" font-size="9" fill="#818cf8" font-weight="600">HTTP REST</text>
+  <text x="825" y="399" text-anchor="middle" font-size="9" fill="#4f46e5">fallback path</text>
+
+  <!-- Server → Remote Ollama -->
+  <line x1="690" y1="355" x2="690" y2="558" stroke="#f97316" stroke-width="1.5" marker-end="url(#arrow-orange)" stroke-dasharray="6,3"/>
+  <rect x="693" y="460" width="90" height="22" rx="4" fill="#0a0800" stroke="#713f12" stroke-width="1"/>
+  <text x="738" y="475" text-anchor="middle" font-size="9" fill="#fb923c">HTTP :11434</text>
+
+  <!-- ─── TAILSCALE LABEL ──────────────────── -->
+  <rect x="820" y="348" width="100" height="22" rx="11" fill="#0c1a3a" stroke="#1d4ed8" stroke-width="1"/>
+  <text x="870" y="363" text-anchor="middle" font-size="9" fill="#60a5fa" font-weight="600">🔒 Tailscale VPN</text>
+
+  <!-- ─── LEGEND ────────────────────────────── -->
+  <rect x="30" y="686" width="1040" height="26" rx="6" fill="rgba(0,0,0,0.3)"/>
+  <line x1="55" y1="699" x2="85" y2="699" stroke="#6366f1" stroke-width="2" stroke-dasharray="4,2"/>
+  <text x="92" y="703" font-size="10" fill="#6366f1">Browser ↔ Server</text>
+  <line x1="220" y1="699" x2="250" y2="699" stroke="#22c55e" stroke-width="2"/>
+  <text x="257" y="703" font-size="10" fill="#22c55e">Gateway control (CLI / WS)</text>
+  <line x1="430" y1="699" x2="460" y2="699" stroke="#f97316" stroke-width="2"/>
+  <text x="467" y="703" font-size="10" fill="#f97316">Ollama API</text>
+  <line x1="560" y1="699" x2="590" y2="699" stroke="#818cf8" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="597" y="703" font-size="10" fill="#818cf8">Remote MM (fallback path)</text>
+  <line x1="780" y1="699" x2="810" y2="699" stroke="#64748b" stroke-width="2" stroke-dasharray="5,2"/>
+  <text x="817" y="703" font-size="10" fill="#64748b">Config file read/write</text>
+</svg>
