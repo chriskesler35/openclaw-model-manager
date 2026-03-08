@@ -1031,6 +1031,95 @@ table.model-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   margin: 0;
 }
 
+/* ── Failover Panel ───────────────────────────────────────────────────────── */
+.failover-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+.failover-panel.has-cooldown {
+  border-color: var(--danger);
+  background: rgba(248,113,113,0.03);
+}
+
+.failover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.failover-title {
+  font-weight: 600;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.provider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+  background: var(--bg-input);
+  transition: background 0.15s;
+}
+.provider-row:hover { background: var(--bg); }
+.provider-row.is-primary { border-left: 3px solid var(--accent); }
+.provider-row.in-cooldown { border-left: 3px solid var(--danger); background: rgba(248,113,113,0.04); }
+
+.pr-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.pr-dot-ready { background: var(--success); }
+.pr-dot-cooldown { background: var(--danger); animation: pulse 1.5s ease infinite; }
+.pr-dot-disabled { background: var(--text-label); }
+
+.pr-info { flex: 1; min-width: 0; }
+.pr-name { font-weight: 500; font-size: 13px; }
+.pr-detail { font-size: 11px; color: var(--text-dim); margin-top: 1px; }
+
+.pr-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+.btn-failover {
+  padding: 5px 12px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-failover:hover { filter: brightness(1.15); }
+.btn-failover:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-clear-cd {
+  padding: 5px 10px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  border: 1px solid rgba(251,191,36,0.2);
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-clear-cd:hover { background: rgba(251,191,36,0.15); }
+
+.cooldown-timer {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--danger);
+  font-weight: 600;
+}
+
 /* ── Remote Test Results ──────────────────────────────────────────────────── */
 .remote-test-grid {
   display: flex;

@@ -19,6 +19,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   refreshSystemStats();
   statsInterval = setInterval(refreshSystemStats, 3000);
 
+  // Provider failover status
+  refreshProviderStatus();
+
   byId('model-input').addEventListener('keydown', e => { if (e.key === 'Enter') setModel(); });
   byId('fallback-input').addEventListener('keydown', e => { if (e.key === 'Enter') addFallback(); });
   byId('alias-model').addEventListener('keydown', e => { if (e.key === 'Enter') addAlias(); });
@@ -87,7 +90,7 @@ function switchTab(tabId) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabId}`));
 
   // Lazy-load data for tabs
-  if (tabId === 'health') refreshHealth();
+  if (tabId === 'health') { refreshHealth(); refreshProviderStatus(); }
   if (tabId === 'fallbacks') refreshFallbacks();
   if (tabId === 'local') refreshLocalModels();
   if (tabId === 'connections') renderConnList();
@@ -120,7 +123,7 @@ function switchConnection() {
 
   // Refresh the currently visible tab's data
   const activeTab = document.querySelector('.tab.active')?.dataset?.tab;
-  if (activeTab === 'health') { refreshHealth(); refreshSystemStats(); }
+  if (activeTab === 'health') { refreshHealth(); refreshSystemStats(); refreshProviderStatus(); }
   if (activeTab === 'local') refreshLocalModels();
   if (activeTab === 'auth') refreshCredentials();
   if (activeTab === 'connections') renderConnList();
@@ -1485,7 +1488,7 @@ async function refreshRemoteData() {
   toast('Refreshing all data for current connection…', 'info');
   refreshAll();
   const activeTab = document.querySelector('.tab.active')?.dataset?.tab;
-  if (activeTab === 'health') { refreshHealth(); refreshSystemStats(); }
+  if (activeTab === 'health') { refreshHealth(); refreshSystemStats(); refreshProviderStatus(); }
   if (activeTab === 'local') refreshLocalModels();
   if (activeTab === 'auth') refreshCredentials();
   if (activeTab === 'connections') renderConnList();
@@ -1528,6 +1531,147 @@ async function discoverGateways() {
     }
   } catch (e) {
     discoverList.innerHTML = `<div class="empty-state">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Provider Failover ────────────────────────────────────────────────────────
+
+let failoverInterval = null;
+
+async function refreshProviderStatus() {
+  const container = byId('provider-failover');
+  if (!container) return;
+
+  try {
+    const res = await api('GET', '/api/providers/status');
+    if (!res.ok) return;
+
+    const { primary, fallbacks, providers } = res;
+    const anyInCooldown = Object.values(providers).some(p => p.inCooldown || p.isDisabled);
+
+    // Build the full model list with provider info
+    const allModels = [primary, ...fallbacks];
+    const modelsByProvider = {};
+    for (const m of allModels) {
+      const prov = m.split('/')[0];
+      if (!modelsByProvider[prov]) modelsByProvider[prov] = [];
+      if (!modelsByProvider[prov].includes(m)) modelsByProvider[prov].push(m);
+    }
+
+    let html = `<div class="failover-panel ${anyInCooldown ? 'has-cooldown' : ''}">`;
+    html += `<div class="failover-header">
+      <span class="failover-title">${anyInCooldown ? '🚨 Provider Cooldown Active' : '✅ All Providers Ready'}</span>
+      <button class="btn btn-sm" onclick="refreshProviderStatus()">↻ Refresh</button>
+    </div>`;
+
+    if (anyInCooldown) {
+      html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
+        A provider is rate-limited. Use <strong>Switch To</strong> to instantly failover to a working provider, or <strong>Clear Cooldown</strong> to reset the timer.
+      </div>`;
+    }
+
+    // Primary model row
+    const primaryProv = primary.split('/')[0];
+    const primaryStatus = providers[primaryProv];
+    const primaryInCooldown = primaryStatus?.inCooldown || primaryStatus?.isDisabled;
+
+    html += `<div class="provider-row is-primary ${primaryInCooldown ? 'in-cooldown' : ''}">
+      <span class="pr-status-dot ${primaryInCooldown ? 'pr-dot-cooldown' : 'pr-dot-ready'}"></span>
+      <div class="pr-info">
+        <div class="pr-name">⭐ ${esc(primary)} <span style="font-size:11px;color:var(--text-label);font-weight:400">(primary)</span></div>
+        <div class="pr-detail">${primaryInCooldown
+          ? `<span class="cooldown-timer">⏳ Cooldown: ${formatCooldown(primaryStatus.cooldownSeconds || primaryStatus.disabledSeconds)} remaining</span> • ${primaryStatus.errorCount} error${primaryStatus.errorCount !== 1 ? 's' : ''}`
+          : 'Ready'
+        }</div>
+      </div>
+      <div class="pr-actions">
+        ${primaryInCooldown ? `<button class="btn-clear-cd" onclick="clearCooldown('${esc(primaryProv)}')">Clear Cooldown</button>` : ''}
+      </div>
+    </div>`;
+
+    // Fallback rows — show unique providers with their best available model
+    const shownProviders = new Set([primaryProv]);
+    for (const fb of fallbacks) {
+      const prov = fb.split('/')[0];
+      const status = providers[prov];
+      const inCooldown = status?.inCooldown || status?.isDisabled;
+      const isReady = !inCooldown;
+
+      // Show provider status indicator
+      const dotClass = status?.isDisabled ? 'pr-dot-disabled' : inCooldown ? 'pr-dot-cooldown' : 'pr-dot-ready';
+
+      let detailText = '';
+      if (inCooldown) {
+        detailText = `<span class="cooldown-timer">⏳ ${formatCooldown(status.cooldownSeconds || status.disabledSeconds)}</span> • ${status.errorCount} error${status.errorCount !== 1 ? 's' : ''}`;
+      } else {
+        detailText = 'Ready — available as fallback';
+      }
+
+      html += `<div class="provider-row ${inCooldown ? 'in-cooldown' : ''}">
+        <span class="pr-status-dot ${dotClass}"></span>
+        <div class="pr-info">
+          <div class="pr-name">${esc(fb)}</div>
+          <div class="pr-detail">${detailText}</div>
+        </div>
+        <div class="pr-actions">
+          ${inCooldown ? `<button class="btn-clear-cd" onclick="clearCooldown('${esc(prov)}')">Clear</button>` : ''}
+          ${isReady && fb !== primary ? `<button class="btn-failover" onclick="failoverTo('${esc(fb)}')">Switch To ⚡</button>` : ''}
+        </div>
+      </div>`;
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+
+    // Start/stop auto-refresh based on cooldown state
+    if (anyInCooldown && !failoverInterval) {
+      failoverInterval = setInterval(refreshProviderStatus, 5000);
+    } else if (!anyInCooldown && failoverInterval) {
+      clearInterval(failoverInterval);
+      failoverInterval = null;
+    }
+
+  } catch (e) {
+    // Don't overwrite on transient errors
+  }
+}
+
+function formatCooldown(seconds) {
+  if (seconds <= 0) return 'expired';
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${s}s`;
+}
+
+async function failoverTo(model) {
+  if (!confirm(`Switch primary model to ${model}?\n\nThis takes effect immediately — no gateway restart needed.`)) return;
+
+  try {
+    const res = await api('POST', '/api/failover', { model });
+    if (res.ok) {
+      toast(`⚡ Switched to ${model} — ${res.note}`, 'success');
+      refreshProviderStatus();
+      refreshModels();
+    } else {
+      toast(`❌ ${res.error}`, 'error');
+    }
+  } catch (e) {
+    toast(`❌ ${e.message}`, 'error');
+  }
+}
+
+async function clearCooldown(provider) {
+  try {
+    const res = await api('POST', '/api/providers/clear-cooldown', { provider });
+    if (res.ok) {
+      toast(`✅ ${res.message}`, 'success');
+      refreshProviderStatus();
+    } else {
+      toast(`❌ ${res.error}`, 'error');
+    }
+  } catch (e) {
+    toast(`❌ ${e.message}`, 'error');
   }
 }
 

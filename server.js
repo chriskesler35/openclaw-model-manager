@@ -1324,6 +1324,88 @@ app.get('/api/gateway/sessions', async (req, res) => {
   }
 });
 
+// ── Failover & Cooldown Management ──────────────────────────────────────────
+
+// Get provider cooldown/error status
+app.get('/api/providers/status', (req, res) => {
+  try {
+    const authProfiles = readJsonFile(AUTH_PROFILES);
+    const config = readJsonFile(OPENCLAW_CONFIG);
+    if (!authProfiles || !config) return res.json({ ok: false, error: 'Could not read config files' });
+
+    const now = Date.now();
+    const stats = authProfiles.usageStats || {};
+    const primary = config.agents?.defaults?.model?.primary || 'unknown';
+    const fallbacks = config.agents?.defaults?.model?.fallbacks || [];
+
+    const providers = {};
+    for (const [profileId, s] of Object.entries(stats)) {
+      const provider = profileId.split(':')[0];
+      const cooldownRemaining = s.cooldownUntil ? Math.max(0, Math.ceil((s.cooldownUntil - now) / 1000)) : 0;
+      const disabledRemaining = s.disabledUntil ? Math.max(0, Math.ceil((s.disabledUntil - now) / 1000)) : 0;
+
+      providers[provider] = {
+        profileId,
+        errorCount: s.errorCount || 0,
+        failureCounts: s.failureCounts || {},
+        lastUsed: s.lastUsed || null,
+        cooldownSeconds: cooldownRemaining,
+        disabledSeconds: disabledRemaining,
+        inCooldown: cooldownRemaining > 0,
+        isDisabled: disabledRemaining > 0,
+        status: disabledRemaining > 0 ? 'disabled' : cooldownRemaining > 0 ? 'cooldown' : 'ready',
+      };
+    }
+
+    res.json({ ok: true, primary, fallbacks, providers });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Clear cooldown for a provider (reset error state)
+app.post('/api/providers/clear-cooldown', (req, res) => {
+  try {
+    const { provider } = req.body;
+    if (!provider) return res.status(400).json({ ok: false, error: 'provider is required' });
+
+    const authProfiles = readJsonFile(AUTH_PROFILES);
+    if (!authProfiles) return res.status(500).json({ ok: false, error: 'Could not read auth profiles' });
+
+    const profileId = `${provider}:default`;
+    if (authProfiles.usageStats?.[profileId]) {
+      authProfiles.usageStats[profileId].cooldownUntil = 0;
+      authProfiles.usageStats[profileId].disabledUntil = 0;
+      authProfiles.usageStats[profileId].errorCount = 0;
+      authProfiles.usageStats[profileId].failureCounts = {};
+      writeJsonFile(AUTH_PROFILES, authProfiles);
+    }
+
+    res.json({ ok: true, message: `Cooldown cleared for ${provider}. The provider is ready to use again.` });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Hot-swap primary model (no restart needed if using CLI)
+app.post('/api/failover', async (req, res) => {
+  try {
+    const { model } = req.body;
+    if (!model) return res.status(400).json({ ok: false, error: 'model is required' });
+
+    // Use CLI to hot-swap — takes effect immediately without restart
+    const out = await run(`openclaw models set "${model}"`, 10000);
+    res.json({
+      ok: true,
+      message: `Primary model switched to ${model}`,
+      note: 'Change is immediate — no gateway restart needed.',
+      output: out,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ── Remote Connectivity Test ─────────────────────────────────────────────────
 
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 5000) {
