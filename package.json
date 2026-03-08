@@ -1,0 +1,14 @@
+{
+  "name": "openclaw-model-manager",
+  "version": "1.0.0",
+  "description": "Standalone GUI for OpenClaw gateway control & model management",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --dev"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}

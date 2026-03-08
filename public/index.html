@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenClaw Model Manager</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header>
+      <div class="header-left">
+        <span class="logo">⚡</span>
+        <h1>OpenClaw <span class="accent">Model Manager</span></h1>
+      </div>
+      <div class="header-center">
+        <div class="connection-switcher">
+          <select id="conn-select" onchange="switchConnection()"></select>
+          <button class="btn btn-sm btn-icon-only" onclick="openConnModal()" title="Manage connections">⚙</button>
+        </div>
+      </div>
+      <div class="header-right">
+        <span id="gateway-badge" class="badge badge-unknown">
+          <span class="dot"></span>
+          <span class="badge-text">Checking…</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- Tab Bar -->
+    <nav class="tab-bar">
+      <button class="tab active" data-tab="health" onclick="switchTab('health')">
+        <span class="tab-icon">💊</span> Health
+      </button>
+      <button class="tab" data-tab="gateway" onclick="switchTab('gateway')">
+        <span class="tab-icon">🔌</span> Gateway
+      </button>
+      <button class="tab" data-tab="models" onclick="switchTab('models')">
+        <span class="tab-icon">🤖</span> Models
+      </button>
+      <button class="tab" data-tab="fallbacks" onclick="switchTab('fallbacks')">
+        <span class="tab-icon">🔗</span> Fallbacks
+      </button>
+      <button class="tab" data-tab="aliases" onclick="switchTab('aliases')">
+        <span class="tab-icon">🏷️</span> Aliases
+      </button>
+      <button class="tab" data-tab="auth" onclick="switchTab('auth')">
+        <span class="tab-icon">🔑</span> Auth
+      </button>
+      <button class="tab" data-tab="local" onclick="switchTab('local')">
+        <span class="tab-icon">💻</span> Local Models
+      </button>
+      <button class="tab" data-tab="connections" onclick="switchTab('connections')">
+        <span class="tab-icon">🌐</span> Connections
+      </button>
+    </nav>
+
+    <!-- Tab Panels -->
+    <main>
+
+      <!-- HEALTH TAB -->
+      <section class="tab-panel active" id="panel-health">
+        <div class="panel-header">
+          <h2>System Health</h2>
+          <button class="btn btn-sm" onclick="refreshHealth(); refreshSystemStats();">↻ Refresh</button>
+        </div>
+
+        <!-- Live System Stats Bar -->
+        <div id="live-system-stats" class="live-stats-grid">
+          <div class="empty-state">Loading system stats…</div>
+        </div>
+
+        <!-- Health Cards -->
+        <div id="health-report" class="health-report" style="margin-top:20px">
+          <div class="empty-state">Loading health report…</div>
+        </div>
+      </section>
+
+      <!-- GATEWAY TAB -->
+      <section class="tab-panel" id="panel-gateway">
+        <div class="panel-header">
+          <h2>Gateway Control</h2>
+          <span id="conn-type-badge" class="conn-type-badge"></span>
+        </div>
+        <div class="panel-content">
+          <div class="stats-grid">
+            <div class="stat-card">
+              <span class="stat-label">Status</span>
+              <span id="gw-status-text" class="stat-value">—</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">PID</span>
+              <span id="gw-pid" class="stat-value mono">—</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Host</span>
+              <span id="gw-host" class="stat-value mono">—</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Port</span>
+              <span id="gw-port" class="stat-value mono">—</span>
+            </div>
+          </div>
+          <div class="button-group" style="margin-top:20px">
+            <button class="btn btn-success btn-lg" onclick="gatewayAction('start')" id="btn-start">
+              ▶ Start
+            </button>
+            <button class="btn btn-danger btn-lg" onclick="gatewayAction('stop')" id="btn-stop">
+              ■ Stop
+            </button>
+            <button class="btn btn-warning btn-lg" onclick="gatewayAction('restart')" id="btn-restart">
+              ↻ Restart
+            </button>
+          </div>
+          <div id="gateway-feedback" class="feedback"></div>
+        </div>
+      </section>
+
+      <!-- MODELS TAB -->
+      <section class="tab-panel" id="panel-models">
+        <div class="panel-header">
+          <h2>Models</h2>
+          <div class="header-controls">
+            <label class="toggle-label">
+              <input type="checkbox" id="show-all-models" onchange="refreshModelList()">
+              Show all
+            </label>
+            <button class="btn btn-sm" onclick="refreshModels()">↻ Refresh</button>
+          </div>
+        </div>
+        <div class="panel-content">
+          <!-- Primary Model Card -->
+          <div class="sub-section">
+            <h3>Primary Model</h3>
+            <div id="primary-model-display" class="model-display">
+              <span class="model-name">Loading…</span>
+            </div>
+            <div class="input-group">
+              <input type="text" id="model-input" placeholder="provider/model or alias" autocomplete="off">
+              <button class="btn btn-primary" onclick="setModel()">Set Primary</button>
+            </div>
+            <div id="model-feedback" class="feedback"></div>
+          </div>
+          <!-- Model List -->
+          <div class="sub-section">
+            <h3>Available Models</h3>
+            <div id="model-list" class="model-table-wrap">
+              <div class="empty-state">Loading…</div>
+            </div>
+          </div>
+
+          <!-- Add New Model -->
+          <div class="sub-section" style="margin-top:24px">
+            <h3>➕ Add New Model</h3>
+            <p class="panel-desc">Add an external API model or a local Ollama model to your configuration.</p>
+
+            <div class="model-type-tabs">
+              <button class="model-type-tab active" onclick="switchModelType('external')">☁️ External (API)</button>
+              <button class="model-type-tab" onclick="switchModelType('local')">💻 Local (Ollama)</button>
+            </div>
+
+            <div id="add-model-external" class="add-model-form">
+              <div class="form-grid">
+                <div class="form-field">
+                  <label>Provider</label>
+                  <select id="add-model-provider">
+                    <option value="">Select provider…</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="google">Google AI</option>
+                    <option value="mistral">Mistral</option>
+                    <option value="groq">Groq</option>
+                    <option value="together">Together AI</option>
+                    <option value="deepseek">DeepSeek</option>
+                  </select>
+                </div>
+                <div class="form-field">
+                  <label>Model ID</label>
+                  <input type="text" id="add-model-id" placeholder="e.g. claude-sonnet-4-5-20250514">
+                </div>
+                <div class="form-field">
+                  <label>Display Name <span class="optional">(optional)</span></label>
+                  <input type="text" id="add-model-name" placeholder="e.g. Claude Sonnet 4.5">
+                </div>
+                <div class="form-field">
+                  <label>Context Window <span class="optional">(optional)</span></label>
+                  <input type="number" id="add-model-ctx" placeholder="200000">
+                </div>
+                <div class="form-field">
+                  <label>Alias <span class="optional">(optional)</span></label>
+                  <input type="text" id="add-model-alias" placeholder="e.g. sonnet">
+                </div>
+              </div>
+              <div id="add-model-cred-status" class="cred-status-inline" style="display:none"></div>
+              <button class="btn btn-primary" onclick="addNewModel()" style="margin-top:12px">Add Model</button>
+            </div>
+
+            <div id="add-model-local" class="add-model-form" style="display:none">
+              <div class="form-grid">
+                <div class="form-field">
+                  <label>Model Tag</label>
+                  <input type="text" id="add-local-model-id" placeholder="e.g. llama3:8b or mistral:7b">
+                </div>
+                <div class="form-field">
+                  <label>Display Name <span class="optional">(optional)</span></label>
+                  <input type="text" id="add-local-model-name" placeholder="e.g. Llama 3 8B (Local)">
+                </div>
+                <div class="form-field">
+                  <label>Context Window <span class="optional">(optional)</span></label>
+                  <input type="number" id="add-local-model-ctx" placeholder="32768" value="32768">
+                </div>
+                <div class="form-field">
+                  <label>Alias <span class="optional">(optional)</span></label>
+                  <input type="text" id="add-local-model-alias" placeholder="e.g. llama-8b-local">
+                </div>
+              </div>
+              <button class="btn btn-primary" onclick="addNewLocalModel()" style="margin-top:12px">Add Local Model</button>
+            </div>
+
+            <div id="add-model-feedback" class="feedback"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- FALLBACKS TAB -->
+      <section class="tab-panel" id="panel-fallbacks">
+        <div class="panel-header">
+          <h2>Fallback Chain</h2>
+          <button class="btn btn-sm btn-danger" onclick="clearFallbacks()">Clear All</button>
+        </div>
+        <div class="panel-content">
+          <p class="panel-desc">When the primary model fails, OpenClaw tries these in order.</p>
+          <div id="fallback-list" class="item-list">
+            <div class="empty-state">Loading…</div>
+          </div>
+          <div class="input-group">
+            <input type="text" id="fallback-input" placeholder="Add fallback model…" autocomplete="off">
+            <button class="btn btn-primary" onclick="addFallback()">Add</button>
+          </div>
+          <div id="fallback-feedback" class="feedback"></div>
+        </div>
+      </section>
+
+      <!-- ALIASES TAB -->
+      <section class="tab-panel" id="panel-aliases">
+        <div class="panel-header">
+          <h2>Model Aliases</h2>
+        </div>
+        <div class="panel-content">
+          <p class="panel-desc">Short names that map to full model identifiers.</p>
+          <div id="alias-list" class="item-list">
+            <div class="empty-state">Loading…</div>
+          </div>
+          <div class="input-row">
+            <input type="text" id="alias-name" placeholder="Alias name" autocomplete="off">
+            <input type="text" id="alias-model" placeholder="provider/model" autocomplete="off">
+            <button class="btn btn-primary" onclick="addAlias()">Add</button>
+          </div>
+          <div id="alias-feedback" class="feedback"></div>
+        </div>
+      </section>
+
+      <!-- AUTH TAB -->
+      <section class="tab-panel" id="panel-auth">
+        <div class="panel-header">
+          <h2>Auth Profiles</h2>
+          <div class="header-controls">
+            <button class="btn btn-sm btn-warning" onclick="runProbe()" id="btn-probe">🔍 Probe Providers</button>
+            <button class="btn btn-sm" onclick="refreshAuth()">↻ Refresh</button>
+          </div>
+        </div>
+        <div class="panel-content">
+          <div id="auth-profiles" class="auth-grid">
+            <div class="empty-state">Loading…</div>
+          </div>
+
+          <!-- Credential Management -->
+          <div class="sub-section" style="margin-top:24px">
+            <h3>🔐 Manage Credentials</h3>
+            <p class="panel-desc">Add or update API keys for your providers. Credentials are stored locally in your OpenClaw auth profiles.</p>
+            <div id="credential-cards" class="cred-grid">
+              <div class="empty-state">Loading credential status…</div>
+            </div>
+          </div>
+
+          <!-- Add/Update Credential Form -->
+          <div class="sub-section" style="margin-top:16px">
+            <div class="gateway-warning">
+              <span class="warning-icon">⚠️</span>
+              <div>
+                <strong>Heads up:</strong> Changing credentials may require a gateway restart. If the gateway is currently handling a conversation or running a task, <strong>wait until it finishes</strong> before restarting. Active sessions will be interrupted if the gateway restarts mid-conversation.
+              </div>
+            </div>
+            <div class="form-grid" style="margin-top:12px">
+              <div class="form-field">
+                <label>Provider</label>
+                <select id="cred-provider" onchange="onCredProviderChange()">
+                  <option value="">Select provider…</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="google">Google AI</option>
+                  <option value="mistral">Mistral</option>
+                  <option value="groq">Groq</option>
+                  <option value="together">Together AI</option>
+                  <option value="deepseek">DeepSeek</option>
+                </select>
+              </div>
+              <div class="form-field">
+                <label id="cred-key-label">API Key / Token</label>
+                <input type="password" id="cred-key" placeholder="Paste your API key or token here">
+                <div id="cred-key-hint" class="field-hint" style="display:none"></div>
+              </div>
+              <div class="form-field">
+                <label>Profile ID <span class="optional">(optional)</span></label>
+                <input type="text" id="cred-profile-id" placeholder="e.g. anthropic:default (auto-generated)">
+              </div>
+            </div>
+            <button class="btn btn-primary" onclick="saveCredential()" style="margin-top:12px">💾 Save Credential</button>
+            <div id="cred-feedback" class="feedback"></div>
+          </div>
+
+          <div class="sub-section" style="margin-top:24px">
+            <h3>Provider Probe Results</h3>
+            <div id="probe-results" class="probe-grid">
+              <div class="empty-state">Click "Probe Providers" to test connectivity</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- LOCAL MODELS TAB -->
+      <section class="tab-panel" id="panel-local">
+        <div class="panel-header">
+          <h2>Local Models</h2>
+          <button class="btn btn-sm" onclick="refreshLocalModels()">↻ Refresh</button>
+        </div>
+        <div class="panel-content">
+          <!-- System Specs -->
+          <div id="system-specs" class="stats-grid" style="margin-bottom:20px">
+            <div class="empty-state">Loading system info…</div>
+          </div>
+
+          <!-- Compatibility Legend -->
+          <div class="legend" style="margin-bottom:16px">
+            <span class="legend-item"><span class="compat-dot compat-ok"></span> Fits in GPU</span>
+            <span class="legend-item"><span class="compat-dot compat-warn"></span> Tight fit / CPU fallback</span>
+            <span class="legend-item"><span class="compat-dot compat-err"></span> Won't fit</span>
+          </div>
+
+          <!-- Model Cards -->
+          <div id="local-model-list" class="local-model-grid">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- CONNECTIONS TAB -->
+      <section class="tab-panel" id="panel-connections">
+        <div class="panel-header">
+          <h2>Remote Connections</h2>
+          <button class="btn btn-sm" onclick="discoverGateways()">📡 Discover</button>
+        </div>
+        <div class="panel-content">
+          <div id="conn-list" class="conn-list"></div>
+
+          <div class="sub-section" style="margin-top:24px">
+            <h3>Add Remote Gateway</h3>
+            <div class="form-grid">
+              <div class="form-field">
+                <label>Name</label>
+                <input type="text" id="conn-name" placeholder="e.g. Pi Server">
+              </div>
+              <div class="form-field">
+                <label>Host</label>
+                <input type="text" id="conn-host" placeholder="e.g. 100.64.0.5 or mypi.ts.net">
+              </div>
+              <div class="form-field">
+                <label>Port</label>
+                <input type="text" id="conn-port" placeholder="18789" value="18789">
+              </div>
+              <div class="form-field">
+                <label>Token (optional)</label>
+                <input type="password" id="conn-token" placeholder="Gateway token">
+              </div>
+              <div class="form-field">
+                <label>Password (optional)</label>
+                <input type="password" id="conn-password" placeholder="Gateway password">
+              </div>
+              <div class="form-field">
+                <label>Model Manager Port</label>
+                <input type="text" id="conn-mm-port" placeholder="18800" value="18800">
+              </div>
+              <div class="form-field">
+                <label>Ollama Port</label>
+                <input type="text" id="conn-ollama-port" placeholder="11434" value="11434">
+              </div>
+              <div class="form-field">
+                <label class="toggle-label">
+                  <input type="checkbox" id="conn-tls"> Use TLS (wss://)
+                </label>
+              </div>
+            </div>
+            <button class="btn btn-primary" onclick="addConnection()" style="margin-top:12px">Add Connection</button>
+            <div id="conn-feedback" class="feedback"></div>
+          </div>
+
+          <div id="discover-results" style="display:none;margin-top:24px">
+            <h3>📡 Discovered Gateways</h3>
+            <div id="discover-list" class="conn-list"></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Connection Modal (kept for quick access from header) -->
+    <div id="conn-modal" class="modal" style="display:none">
+      <div class="modal-backdrop" onclick="closeConnModal()"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>🌐 Quick Connect</h2>
+          <button class="btn-close" onclick="closeConnModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div id="modal-conn-list" class="conn-list"></div>
+          <button class="btn btn-primary" onclick="closeConnModal(); switchTab('connections')" style="margin-top:12px; width:100%">
+            Manage Connections →
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast-container"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
