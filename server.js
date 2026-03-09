@@ -1575,8 +1575,8 @@ app.get('/api/:connId/remote-test', async (req, res) => {
           ok: false, url: `${proto}://${conn.host}:${gwPort}`,
           error: e.message,
           hint: isTimeout
-            ? `Gateway at ${conn.host}:${gwPort} timed out. Check: 1) Is the gateway running? 2) Is the port open in the firewall? 3) Is the host reachable?`
-            : `Cannot connect to gateway at ${conn.host}:${gwPort}: ${e.message}`
+            ? `Gateway at ${conn.host}:${gwPort} timed out (${connTimeout}ms). Checklist:\n• Is OpenClaw gateway running on the remote machine? (openclaw gateway status)\n• Is port ${gwPort} open in the remote firewall?\n• Try increasing the Connection Timeout in connection settings\n• For Tailscale relay connections, 30000ms+ is recommended`
+            : `Cannot connect to gateway at ${conn.host}:${gwPort}. Checklist:\n• Is the host reachable? (ping ${conn.host})\n• Is OpenClaw gateway running? (openclaw gateway start)\n• Is port ${gwPort} open in the remote firewall?`
         };
       }
     })(),
@@ -1596,8 +1596,8 @@ app.get('/api/:connId/remote-test', async (req, res) => {
           ok: false, url: `${proto}://${conn.host}:${mmPort}`,
           error: e.message,
           hint: isTimeout
-            ? `Model Manager at ${conn.host}:${mmPort} timed out. Run "node server.js" on the remote machine to start it.`
-            : `Model Manager not reachable at ${conn.host}:${mmPort}. To set up: git clone, npm install, node server.js`
+            ? `Model Manager at ${conn.host}:${mmPort} timed out (${connTimeout}ms). Checklist:\n• Is Model Manager running on the remote machine? (node server.js)\n• Is port ${mmPort} open in the remote firewall?\n• Try increasing the Connection Timeout in connection settings\n• For Tailscale relay connections, 30000ms+ is recommended`
+            : `Model Manager not reachable at ${conn.host}:${mmPort}. Setup on the remote machine:\n1. git clone https://github.com/chriskesler35/openclaw-model-manager\n2. cd openclaw-model-manager && npm install\n3. node server.js\n4. Open port ${mmPort} in the firewall`
         };
       }
     })(),
@@ -1617,8 +1617,8 @@ app.get('/api/:connId/remote-test', async (req, res) => {
           ok: false, url: `http://${conn.host}:${ollamaPort}`,
           error: e.message,
           hint: isTimeout
-            ? `Ollama at ${conn.host}:${ollamaPort} timed out. Check if Ollama is running and the port is open.`
-            : `Ollama not reachable at ${conn.host}:${ollamaPort}: ${e.message}`
+            ? `Ollama at ${conn.host}:${ollamaPort} timed out (${connTimeout}ms). Checklist:\n• Is Ollama running on the remote machine?\n• Is Ollama bound to 0.0.0.0? (set OLLAMA_HOST=0.0.0.0 and restart Ollama)\n• Is port ${ollamaPort} open in the remote firewall?\n• Try increasing the Connection Timeout in connection settings`
+            : `Ollama not reachable at ${conn.host}:${ollamaPort}. Checklist:\n• Install Ollama: https://ollama.com/download\n• Set OLLAMA_HOST=0.0.0.0 so it accepts remote connections\n• Open port ${ollamaPort} in the remote firewall\n• Restart Ollama after changes`
         };
       }
     })(),

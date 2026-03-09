@@ -392,45 +392,78 @@
           <div id="conn-list" class="conn-list"></div>
 
           <div class="sub-section" style="margin-top:24px">
-            <h3>Add Remote Gateway</h3>
+            <h3>Add Remote Connection</h3>
+            <div class="setup-guide" style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px;font-size:13px;line-height:1.6">
+              <strong>📋 Before connecting to a remote machine:</strong>
+              <ol style="margin:8px 0 0 0;padding-left:20px">
+                <li><strong>Install Model Manager</strong> on the remote machine — <code>git clone</code> the repo, run <code>npm install</code>, then <code>node server.js</code></li>
+                <li><strong>Open firewall ports</strong> on the remote machine for incoming connections:
+                  <ul style="margin:4px 0;padding-left:16px">
+                    <li><strong>18800</strong> (Model Manager) — <em>required</em> for remote management</li>
+                    <li><strong>11434</strong> (Ollama) — needed to see local AI models</li>
+                    <li><strong>18789</strong> (OpenClaw Gateway) — needed for gateway health checks</li>
+                  </ul>
+                  <details style="margin-top:4px">
+                    <summary style="cursor:pointer;color:var(--accent)">Example firewall commands</summary>
+                    <div style="margin-top:6px">
+                      <strong>Windows (admin PowerShell) — allow from Tailscale only:</strong>
+                      <pre style="background:var(--bg);padding:8px;border-radius:4px;margin:4px 0;font-size:11px;overflow-x:auto">netsh advfirewall firewall add rule name="Model Manager" dir=in action=allow protocol=TCP localport=18800 remoteip=100.64.0.0/10
+netsh advfirewall firewall add rule name="Ollama" dir=in action=allow protocol=TCP localport=11434 remoteip=100.64.0.0/10
+netsh advfirewall firewall add rule name="OpenClaw Gateway" dir=in action=allow protocol=TCP localport=18789 remoteip=100.64.0.0/10</pre>
+                      <strong>Linux (ufw):</strong>
+                      <pre style="background:var(--bg);padding:8px;border-radius:4px;margin:4px 0;font-size:11px;overflow-x:auto">sudo ufw allow from 100.64.0.0/10 to any port 18800,11434,18789 proto tcp</pre>
+                    </div>
+                  </details>
+                </li>
+                <li><strong>Use the remote machine's IP</strong> — Tailscale IP (100.x.x.x), LAN IP (192.168.x.x), or hostname</li>
+              </ol>
+            </div>
             <div class="form-grid">
               <div class="form-field">
-                <label>Name</label>
-                <input type="text" id="conn-name" placeholder="e.g. Pi Server">
+                <label>Connection Name</label>
+                <input type="text" id="conn-name" placeholder="e.g. Desktop, Pi Server, Work Laptop">
+                <small style="color:var(--text-muted);font-size:11px">A friendly name to identify this machine</small>
               </div>
               <div class="form-field">
-                <label>Host</label>
-                <input type="text" id="conn-host" placeholder="e.g. 100.64.0.5 or mypi.ts.net">
+                <label>Host / IP Address</label>
+                <input type="text" id="conn-host" placeholder="e.g. 100.64.0.5 or 192.168.1.100">
+                <small style="color:var(--text-muted);font-size:11px">Tailscale IP, LAN IP, or hostname of the remote machine</small>
               </div>
               <div class="form-field">
-                <label>Port</label>
+                <label>Gateway Port</label>
                 <input type="text" id="conn-port" placeholder="18789" value="18789">
+                <small style="color:var(--text-muted);font-size:11px">OpenClaw gateway port (default: 18789)</small>
               </div>
               <div class="form-field">
-                <label>Token (optional)</label>
-                <input type="password" id="conn-token" placeholder="Gateway token">
+                <label>Gateway Token <span style="opacity:0.5">(optional)</span></label>
+                <input type="password" id="conn-token" placeholder="From remote openclaw.json → gateway.auth.token">
+                <small style="color:var(--text-muted);font-size:11px">Required if the remote gateway has auth enabled</small>
               </div>
               <div class="form-field">
-                <label>Password (optional)</label>
+                <label>Gateway Password <span style="opacity:0.5">(optional)</span></label>
                 <input type="password" id="conn-password" placeholder="Gateway password">
+                <small style="color:var(--text-muted);font-size:11px">Alternative to token — if gateway uses password auth</small>
               </div>
               <div class="form-field">
                 <label>Model Manager Port</label>
                 <input type="text" id="conn-mm-port" placeholder="18800" value="18800">
+                <small style="color:var(--text-muted);font-size:11px">Remote Model Manager port (default: 18800)</small>
               </div>
               <div class="form-field">
                 <label>Ollama Port</label>
                 <input type="text" id="conn-ollama-port" placeholder="11434" value="11434">
+                <small style="color:var(--text-muted);font-size:11px">Remote Ollama API port (default: 11434)</small>
               </div>
               <div class="form-field">
-                <label>Connection Timeout (ms)</label>
+                <label>Connection Timeout</label>
                 <input type="number" id="conn-timeout" placeholder="15000" value="15000" min="1000" max="60000" step="1000">
-                <small style="color:var(--text-muted);font-size:11px">Increase for slow/relay connections (default 15s)</small>
+                <small style="color:var(--text-muted);font-size:11px">Milliseconds to wait for responses. Increase to 30000+ for Tailscale relay or high-latency connections</small>
               </div>
               <div class="form-field">
                 <label class="toggle-label">
                   <input type="checkbox" id="conn-tls"> Use TLS (wss://)
                 </label>
+                <small style="color:var(--text-muted);font-size:11px">Enable if the remote gateway uses HTTPS/WSS</small>
               </div>
             </div>
             <button class="btn btn-primary" onclick="addConnection()" style="margin-top:12px">Add Connection</button>
@@ -440,7 +473,7 @@
           <!-- Remote Connectivity Test -->
           <div class="sub-section" style="margin-top:24px">
             <h3>🔍 Remote Connectivity Test</h3>
-            <p class="panel-desc">Test whether the selected connection's services are reachable.</p>
+            <p class="panel-desc">Test whether the selected connection's services are reachable. All three services should be green for full remote management.</p>
             <div style="display:flex;gap:8px;margin-bottom:12px">
               <button class="btn btn-primary" onclick="testRemoteConnectivity()" id="btn-remote-test">🔍 Test Connectivity</button>
               <button class="btn btn-sm" onclick="refreshRemoteData()">↻ Refresh Remote Data</button>

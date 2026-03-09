@@ -1314,11 +1314,12 @@ async function renderConnList() {
       <div class="conn-item-status ${statusCls}"></div>
       <div class="conn-item-info">
         <div class="conn-item-name">${esc(c.name)} ${c.default ? '⭐' : ''}</div>
-        <div class="conn-item-host">${c.type === 'local' ? 'localhost (CLI)' : `${esc(c.host || '')}:${c.port || 18789}`}${c.token ? ' 🔒' : ''}</div>
+        <div class="conn-item-host">${c.type === 'local' ? 'localhost (CLI)' : `${esc(c.host || '')}:${c.port || 18789}`}${c.token ? ' 🔒' : ''}${c.type !== 'local' ? ` · MM:${c.mmPort||18800} · Ollama:${c.ollamaPort||11434} · Timeout:${((c.timeoutMs||15000)/1000)}s` : ''}</div>
       </div>
       <div class="conn-item-actions">
         ${!c.default ? `<button class="btn btn-sm" onclick="setDefaultConn('${c.id}')" title="Set default">⭐</button>` : ''}
         <button class="btn btn-sm" onclick="byId('conn-select').value='${c.id}'; switchConnection();" title="Switch to">→</button>
+        ${c.type !== 'local' ? `<button class="btn btn-sm" onclick="editConn('${c.id}')" title="Edit connection settings">✏️</button>` : ''}
         ${c.type !== 'local' ? `<button class="btn btn-sm btn-danger" onclick="deleteConn('${c.id}')" title="Remove">✕</button>` : ''}
       </div>
     </div>`;
@@ -1360,6 +1361,86 @@ async function addConnection() {
       feedback('conn-feedback', res.error, 'error');
     }
   } catch (e) { feedback('conn-feedback', e.message, 'error'); }
+}
+
+function editConn(id) {
+  const c = connections.find(x => x.id === id);
+  if (!c) return;
+  const container = byId('conn-list');
+  // Insert edit form after the connection item
+  const existingForm = document.getElementById('edit-conn-form');
+  if (existingForm) existingForm.remove();
+
+  const form = document.createElement('div');
+  form.id = 'edit-conn-form';
+  form.style.cssText = 'background:var(--bg-card);border:1px solid var(--accent);border-radius:8px;padding:16px;margin:8px 0';
+  form.innerHTML = `
+    <h4 style="margin:0 0 12px 0">Edit: ${esc(c.name)}</h4>
+    <div class="form-grid">
+      <div class="form-field">
+        <label>Host / IP</label>
+        <input type="text" id="edit-host" value="${esc(c.host || '')}">
+      </div>
+      <div class="form-field">
+        <label>Gateway Port</label>
+        <input type="text" id="edit-port" value="${c.port || 18789}">
+      </div>
+      <div class="form-field">
+        <label>Token</label>
+        <input type="password" id="edit-token" value="${esc(c.token || '')}" placeholder="Leave empty to keep current">
+      </div>
+      <div class="form-field">
+        <label>Model Manager Port</label>
+        <input type="text" id="edit-mm-port" value="${c.mmPort || 18800}">
+      </div>
+      <div class="form-field">
+        <label>Ollama Port</label>
+        <input type="text" id="edit-ollama-port" value="${c.ollamaPort || 11434}">
+      </div>
+      <div class="form-field">
+        <label>Connection Timeout (ms)</label>
+        <input type="number" id="edit-timeout" value="${c.timeoutMs || 15000}" min="1000" max="60000" step="1000">
+        <small style="color:var(--text-muted);font-size:11px">Increase to 30000+ for Tailscale relay connections</small>
+      </div>
+      <div class="form-field">
+        <label class="toggle-label">
+          <input type="checkbox" id="edit-tls" ${c.tls ? 'checked' : ''}> Use TLS
+        </label>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-primary" onclick="saveEditConn('${c.id}')">Save Changes</button>
+      <button class="btn" onclick="document.getElementById('edit-conn-form').remove()">Cancel</button>
+    </div>
+    <div id="edit-conn-feedback" class="feedback"></div>
+  `;
+  container.appendChild(form);
+  form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+async function saveEditConn(id) {
+  const data = {
+    host: byId('edit-host').value.trim(),
+    port: parseInt(byId('edit-port').value) || 18789,
+    token: byId('edit-token').value.trim() || undefined,
+    mmPort: parseInt(byId('edit-mm-port').value) || 18800,
+    ollamaPort: parseInt(byId('edit-ollama-port').value) || 11434,
+    timeoutMs: parseInt(byId('edit-timeout').value) || 15000,
+    tls: byId('edit-tls').checked,
+  };
+  try {
+    const res = await api('PUT', `/api/connections/${id}`, data);
+    if (res.ok) {
+      toast('Connection updated', 'success');
+      document.getElementById('edit-conn-form')?.remove();
+      await loadConnections();
+      renderConnList();
+    } else {
+      feedback('edit-conn-feedback', res.error, 'error');
+    }
+  } catch (e) {
+    feedback('edit-conn-feedback', e.message, 'error');
+  }
 }
 
 async function deleteConn(id) {
@@ -1452,7 +1533,7 @@ async function testRemoteConnectivity() {
         <div class="rt-body">
           <div class="rt-title">${statusIcon} ${esc(t.label)} — ${statusText}</div>
           ${d.url ? `<div class="rt-url">${esc(d.url)}</div>` : ''}
-          <div class="rt-hint">${esc(d.hint || '')}</div>
+          <div class="rt-hint" style="white-space:pre-line">${esc(d.hint || '')}</div>
           ${extraHtml}
           <button class="rt-expand-btn" onclick="toggleRtRaw('${rawId}')">📋 Raw Data</button>
           <div id="${rawId}" class="rt-raw" style="display:none">
