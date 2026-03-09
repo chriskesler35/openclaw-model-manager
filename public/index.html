@@ -423,6 +423,11 @@
                 <input type="text" id="conn-ollama-port" placeholder="11434" value="11434">
               </div>
               <div class="form-field">
+                <label>Connection Timeout (ms)</label>
+                <input type="number" id="conn-timeout" placeholder="15000" value="15000" min="1000" max="60000" step="1000">
+                <small style="color:var(--text-muted);font-size:11px">Increase for slow/relay connections (default 15s)</small>
+              </div>
+              <div class="form-field">
                 <label class="toggle-label">
                   <input type="checkbox" id="conn-tls"> Use TLS (wss://)
                 </label>

@@ -138,7 +138,7 @@ app.get('/api/connections', (req, res) => {
 });
 
 app.post('/api/connections', (req, res) => {
-  const { name, host, port, token, password, tls, mmPort, ollamaPort } = req.body;
+  const { name, host, port, token, password, tls, mmPort, ollamaPort, timeoutMs } = req.body;
   if (!name || !host) return res.status(400).json({ ok: false, error: 'name and host required' });
 
   const data = loadConnections();
@@ -158,6 +158,7 @@ app.post('/api/connections', (req, res) => {
     tls: !!tls,
     mmPort: mmPort || 18800,
     ollamaPort: ollamaPort || 11434,
+    timeoutMs: timeoutMs ? parseInt(timeoutMs) : 15000,
     default: false,
   });
   saveConnections(data);
@@ -169,7 +170,7 @@ app.put('/api/connections/:id', (req, res) => {
   const conn = data.connections.find(c => c.id === req.params.id);
   if (!conn) return res.status(404).json({ ok: false, error: 'Not found' });
 
-  const { name, host, port, token, password, tls, mmPort, ollamaPort } = req.body;
+  const { name, host, port, token, password, tls, mmPort, ollamaPort, timeoutMs } = req.body;
   if (name) conn.name = name;
   if (host) conn.host = host;
   if (port) conn.port = port;
@@ -178,6 +179,7 @@ app.put('/api/connections/:id', (req, res) => {
   if (tls !== undefined) conn.tls = !!tls;
   if (mmPort !== undefined) conn.mmPort = mmPort || 18800;
   if (ollamaPort !== undefined) conn.ollamaPort = ollamaPort || 11434;
+  if (timeoutMs !== undefined) conn.timeoutMs = timeoutMs ? parseInt(timeoutMs) : 15000;
 
   saveConnections(data);
   res.json({ ok: true });
@@ -1408,7 +1410,7 @@ app.post('/api/failover', async (req, res) => {
 
 // ── Remote Connectivity Test ─────────────────────────────────────────────────
 
-async function fetchWithTimeout(url, opts = {}, timeoutMs = 5000) {
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 15000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -1463,6 +1465,7 @@ app.get('/api/:connId/remote-test', async (req, res) => {
   const gwPort = conn.port || 18789;
   const mmPort = conn.mmPort || 18800;
   const ollamaPort = conn.ollamaPort || 11434;
+  const connTimeout = conn.timeoutMs || 15000;
   const start = Date.now();
 
   // Run all three tests in parallel
@@ -1470,7 +1473,7 @@ app.get('/api/:connId/remote-test', async (req, res) => {
     // Gateway health
     (async () => {
       try {
-        const r = await fetchWithTimeout(`${proto}://${conn.host}:${gwPort}/health`, { headers }, 5000);
+        const r = await fetchWithTimeout(`${proto}://${conn.host}:${gwPort}/health`, { headers }, connTimeout);
         let body = null;
         try { body = await r.json(); } catch { try { body = await r.text(); } catch {} }
         if (r.ok) return { ok: true, url: `${proto}://${conn.host}:${gwPort}`, status: r.status, body, hint: 'Gateway is running and responding' };
@@ -1490,7 +1493,7 @@ app.get('/api/:connId/remote-test', async (req, res) => {
     // Model Manager
     (async () => {
       try {
-        const r = await fetchWithTimeout(`${proto}://${conn.host}:${mmPort}/api/system/info`, {}, 5000);
+        const r = await fetchWithTimeout(`${proto}://${conn.host}:${mmPort}/api/system/info`, {}, connTimeout);
         if (r.ok) {
           const data = await r.json();
           return { ok: true, url: `${proto}://${conn.host}:${mmPort}`, info: data, hint: 'Remote Model Manager is running — full system stats available' };
@@ -1511,7 +1514,7 @@ app.get('/api/:connId/remote-test', async (req, res) => {
     // Ollama
     (async () => {
       try {
-        const r = await fetchWithTimeout(`http://${conn.host}:${ollamaPort}/api/tags`, {}, 5000);
+        const r = await fetchWithTimeout(`http://${conn.host}:${ollamaPort}/api/tags`, {}, connTimeout);
         if (r.ok) {
           const data = await r.json();
           return { ok: true, url: `http://${conn.host}:${ollamaPort}`, modelsCount: data.models?.length || 0, hint: `Ollama is running with ${data.models?.length || 0} models installed` };

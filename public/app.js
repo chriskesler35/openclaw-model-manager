@@ -1333,6 +1333,7 @@ async function addConnection() {
   const password = byId('conn-password').value.trim();
   const mmPort = parseInt(byId('conn-mm-port')?.value) || 18800;
   const ollamaPort = parseInt(byId('conn-ollama-port')?.value) || 11434;
+  const timeoutMs = parseInt(byId('conn-timeout')?.value) || 15000;
   const tls = byId('conn-tls').checked;
 
   if (!name || !host) {
@@ -1341,7 +1342,7 @@ async function addConnection() {
   }
 
   try {
-    const res = await api('POST', '/api/connections', { name, host, port, token: token || null, password: password || null, tls, mmPort, ollamaPort });
+    const res = await api('POST', '/api/connections', { name, host, port, token: token || null, password: password || null, tls, mmPort, ollamaPort, timeoutMs });
     if (res.ok) {
       toast(`Connection "${name}" added`, 'success');
       byId('conn-name').value = '';
@@ -1351,6 +1352,7 @@ async function addConnection() {
       byId('conn-password').value = '';
       if (byId('conn-mm-port')) byId('conn-mm-port').value = '18800';
       if (byId('conn-ollama-port')) byId('conn-ollama-port').value = '11434';
+      if (byId('conn-timeout')) byId('conn-timeout').value = '15000';
       byId('conn-tls').checked = false;
       await loadConnections();
       renderConnList();
