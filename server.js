@@ -56,19 +56,20 @@ function tryJsonParse(str) {
 }
 
 // Remote gateway RPC via WebSocket (one-shot request/response)
-function gatewayRpc(conn, method, params = {}, timeoutMs = 10000) {
+function gatewayRpc(conn, method, params = {}, timeoutMs) {
+  const effectiveTimeout = timeoutMs || conn.timeoutMs || 15000;
   return new Promise((resolve, reject) => {
     const proto = conn.tls ? 'wss' : 'ws';
     const url = `${proto}://${conn.host}:${conn.port}`;
     const ws = new WebSocket(url, {
       headers: conn.token ? { 'Authorization': `Bearer ${conn.token}` } : {},
-      handshakeTimeout: 5000,
+      handshakeTimeout: Math.min(effectiveTimeout, 30000),
     });
 
     const timer = setTimeout(() => {
       ws.close();
-      reject(new Error(`RPC timeout (${timeoutMs}ms)`));
-    }, timeoutMs);
+      reject(new Error(`RPC timeout (${effectiveTimeout}ms)`));
+    }, effectiveTimeout);
 
     ws.on('open', () => {
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }));
