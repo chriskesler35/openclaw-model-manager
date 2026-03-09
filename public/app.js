@@ -1715,7 +1715,16 @@ async function refreshProviderStatus() {
     }
 
   } catch (e) {
-    // Don't overwrite on transient errors
+    container.innerHTML = `<div class="failover-panel" style="border-color:var(--danger)">
+      <div class="failover-header">
+        <span class="failover-title">⚠️ Provider Status Unavailable</span>
+        <button class="btn btn-sm" onclick="refreshProviderStatus()">↻ Retry</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);margin-top:8px">
+        Could not load provider status: ${esc(e.message)}<br>
+        <small>This may happen if the remote Model Manager is unreachable or still starting up.</small>
+      </div>
+    </div>`;
   }
 }
 
