@@ -99,7 +99,7 @@ async function httpHealthCheck(conn) {
   const proto = conn.tls ? 'https' : 'http';
   const url = `${proto}://${conn.host}:${conn.port}/health`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
+  const timer = setTimeout(() => controller.abort(), 15000);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
@@ -703,7 +703,7 @@ app.get('/api/:connId/system/stats', async (req, res) => {
   const proto = conn.tls ? 'https' : 'http';
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4000);
+    const timer = setTimeout(() => controller.abort(), 15000);
     const r = await fetch(`${proto}://${conn.host}:${mmPort}/api/system/stats`, { signal: controller.signal });
     clearTimeout(timer);
     if (r.ok) return res.json(await r.json());
@@ -946,7 +946,7 @@ app.get('/api/:connId/system/info', async (req, res) => {
   // Try remote Model Manager first
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
+    const timer = setTimeout(() => controller.abort(), 15000);
     const r = await fetch(`${proto}://${conn.host}:${mmPort}/api/system/info`, {
       signal: controller.signal,
     });
@@ -984,7 +984,7 @@ app.get('/api/:connId/system/local-models', async (req, res) => {
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
+    const timer = setTimeout(() => controller.abort(), 15000);
     const r = await fetch(`${proto}://${conn.host}:${mmPort}/api/system/local-models`, {
       signal: controller.signal,
     });
@@ -999,7 +999,7 @@ app.get('/api/:connId/system/local-models', async (req, res) => {
   // Fallback: try Ollama API directly on the remote host
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
+    const timer = setTimeout(() => controller.abort(), 15000);
     const r = await fetch(`http://${conn.host}:${ollamaPort}/api/tags`, {
       signal: controller.signal,
     });
