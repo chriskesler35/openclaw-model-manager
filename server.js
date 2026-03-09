@@ -60,29 +60,79 @@ function gatewayRpc(conn, method, params = {}, timeoutMs) {
   const effectiveTimeout = timeoutMs || conn.timeoutMs || 15000;
   return new Promise((resolve, reject) => {
     const proto = conn.tls ? 'wss' : 'ws';
-    const url = `${proto}://${conn.host}:${conn.port}`;
+    const url = `${proto}://${conn.host}:${conn.port || 18789}`;
     const ws = new WebSocket(url, {
       headers: conn.token ? { 'Authorization': `Bearer ${conn.token}` } : {},
       handshakeTimeout: Math.min(effectiveTimeout, 30000),
     });
+
+    let connected = false;
+    const reqId = `mm-${Date.now()}`;
 
     const timer = setTimeout(() => {
       ws.close();
       reject(new Error(`RPC timeout (${effectiveTimeout}ms)`));
     }, effectiveTimeout);
 
-    ws.on('open', () => {
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }));
-    });
-
     ws.on('message', (data) => {
-      clearTimeout(timer);
       try {
         const msg = JSON.parse(data.toString());
-        ws.close();
-        if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
-        else resolve(msg.result);
+
+        // Step 1: Handle connect.challenge → send connect request with auth
+        if (msg.type === 'event' && msg.event === 'connect.challenge') {
+          const connectReq = {
+            type: 'req',
+            id: 'mm-connect',
+            method: 'connect',
+            params: {
+              minProtocol: 3,
+              maxProtocol: 3,
+              client: { id: 'model-manager', version: '1.0.0', platform: process.platform, mode: 'operator' },
+              role: 'operator',
+              scopes: ['operator.read', 'operator.write'],
+              caps: [],
+              commands: [],
+              permissions: {},
+              auth: {},
+              locale: 'en-US',
+              userAgent: 'openclaw-model-manager/1.0.0',
+            },
+          };
+          if (conn.token) connectReq.params.auth.token = conn.token;
+          if (conn.password) connectReq.params.auth.password = conn.password;
+          if (msg.payload?.nonce) {
+            connectReq.params.device = { nonce: msg.payload.nonce };
+          }
+          ws.send(JSON.stringify(connectReq));
+          return;
+        }
+
+        // Step 2: Handle connect response → send the actual RPC
+        if (msg.type === 'res' && msg.id === 'mm-connect') {
+          if (!msg.ok) {
+            clearTimeout(timer);
+            ws.close();
+            reject(new Error(`Gateway auth failed: ${JSON.stringify(msg.payload || msg.error || 'unknown')}`));
+            return;
+          }
+          connected = true;
+          // Now send the actual RPC request
+          ws.send(JSON.stringify({ jsonrpc: '2.0', id: reqId, method, params }));
+          return;
+        }
+
+        // Step 3: Handle the RPC response
+        if (connected && (msg.id === reqId || msg.id === 1)) {
+          clearTimeout(timer);
+          ws.close();
+          if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+          else resolve(msg.result);
+          return;
+        }
+
+        // Ignore other events (ticks, broadcasts, etc.)
       } catch (e) {
+        clearTimeout(timer);
         ws.close();
         reject(e);
       }
@@ -92,7 +142,27 @@ function gatewayRpc(conn, method, params = {}, timeoutMs) {
       clearTimeout(timer);
       reject(new Error(`WebSocket error: ${e.message}`));
     });
+
+    ws.on('close', () => {
+      clearTimeout(timer);
+    });
   });
+}
+
+// Proxy a request through the remote Model Manager API
+async function remoteMMProxy(conn, path, method = 'GET', body = null) {
+  const proto = conn.tls ? 'https' : 'http';
+  const mmPort = conn.mmPort || 18800;
+  const timeout = conn.timeoutMs || 15000;
+  const url = `${proto}://${conn.host}:${mmPort}${path}`;
+  const opts = { method, signal: AbortSignal.timeout(timeout) };
+  if (body) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(`Remote MM returned HTTP ${r.status}`);
+  return await r.json();
 }
 
 // Remote HTTP health check
@@ -218,17 +288,17 @@ app.get('/api/connections/:id/health', async (req, res) => {
     return;
   }
 
-  // Remote: try WS RPC first, fallback to HTTP health
+  // Remote: try remote Model Manager first, fallback to HTTP health
   try {
-    const result = await gatewayRpc(conn, 'status', {}, 8000);
-    res.json({ ok: true, status: { running: true, rpc: true, ...result } });
-  } catch (rpcErr) {
-    // Fallback to HTTP
+    const result = await remoteMMProxy(conn, '/api/local/gateway/status');
+    res.json({ ok: true, status: { running: true, proxy: true, ...(result.status || result) } });
+  } catch (proxyErr) {
+    // Fallback to HTTP health check
     const httpRes = await httpHealthCheck(conn);
     if (httpRes.ok) {
-      res.json({ ok: true, status: { running: true, rpc: false, http: true } });
+      res.json({ ok: true, status: { running: true, proxy: false, http: true } });
     } else {
-      res.json({ ok: true, status: { running: false, rpc: false, rpcError: rpcErr.message, httpError: httpRes.error } });
+      res.json({ ok: true, status: { running: false, proxy: false, proxyError: proxyErr.message, httpError: httpRes.error } });
     }
   }
 });
@@ -249,10 +319,16 @@ app.get('/api/:connId/gateway/status', async (req, res) => {
     }
   } else {
     try {
-      const result = await gatewayRpc(conn, 'status', {}, 8000);
-      res.json({ ok: true, status: { running: true, ...result } });
+      const result = await remoteMMProxy(conn, '/api/local/gateway/status');
+      res.json({ ok: true, status: result.status || result });
     } catch (e) {
-      res.json({ ok: true, status: { running: false, error: e.message } });
+      // Fallback to HTTP health check
+      try {
+        const health = await httpHealthCheck(conn);
+        res.json({ ok: true, status: { running: health.ok, ...health } });
+      } catch (e2) {
+        res.json({ ok: true, status: { running: false, error: e.message } });
+      }
     }
   }
 });
@@ -277,7 +353,7 @@ app.post('/api/:connId/gateway/:action', async (req, res) => {
     // Remote: for restart, try RPC signal; start/stop need SSH or remote agent
     if (action === 'restart') {
       try {
-        const result = await gatewayRpc(conn, 'restart', {}, 15000);
+        const result = await remoteMMProxy(conn, '/api/local/gateway/restart', 'POST');
         res.json({ ok: true, message: 'Restart signal sent', result });
       } catch (e) {
         // Try via CLI with remote flags
@@ -319,8 +395,8 @@ app.get('/api/:connId/models/status', async (req, res) => {
     }
   } else {
     try {
-      const result = await gatewayRpc(conn, 'models.status', {}, 10000);
-      res.json({ ok: true, data: result });
+      const result = await remoteMMProxy(conn, '/api/local/models/status');
+      res.json({ ok: true, data: result.data || result });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
     }
@@ -341,8 +417,9 @@ app.get('/api/:connId/models/list', async (req, res) => {
     }
   } else {
     try {
-      const result = await gatewayRpc(conn, 'models.list', { all: req.query.all === 'true' }, 10000);
-      res.json({ ok: true, data: result });
+      const allFlag = req.query.all === 'true' ? '?all=true' : '';
+      const result = await remoteMMProxy(conn, `/api/local/models/list${allFlag}`);
+      res.json({ ok: true, data: result.data || result });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
     }
@@ -364,8 +441,8 @@ app.post('/api/:connId/models/set', async (req, res) => {
     }
   } else {
     try {
-      const result = await gatewayRpc(conn, 'models.set', { model }, 10000);
-      res.json({ ok: true, message: `Model set to ${model}`, result });
+      const result = await remoteMMProxy(conn, '/api/local/models/set', 'POST', { model });
+      res.json({ ok: true, message: result.message || `Model set to ${model}`, result });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
     }
@@ -383,9 +460,8 @@ app.get('/api/:connId/models/aliases', async (req, res) => {
       const raw = await run('openclaw models aliases list --json');
       res.json({ ok: true, data: tryJsonParse(raw) || raw });
     } else {
-      // Try from models.status RPC
-      const result = await gatewayRpc(conn, 'models.status', {}, 10000);
-      res.json({ ok: true, data: result?.aliases || {} });
+      const result = await remoteMMProxy(conn, '/api/local/models/aliases');
+      res.json({ ok: true, data: result.data || result });
     }
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -404,7 +480,10 @@ app.post('/api/:connId/models/aliases', async (req, res) => {
       res.json({ ok: true, message: out || `Alias ${alias} → ${model}` });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   } else {
-    res.status(501).json({ ok: false, error: 'Alias management not yet supported remotely' });
+    try {
+      const result = await remoteMMProxy(conn, '/api/local/models/aliases', 'POST', { alias, model });
+      res.json(result);
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   }
 });
 
@@ -418,7 +497,10 @@ app.delete('/api/:connId/models/aliases/:alias', async (req, res) => {
       res.json({ ok: true, message: out || 'Alias removed' });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   } else {
-    res.status(501).json({ ok: false, error: 'Alias management not yet supported remotely' });
+    try {
+      const result = await remoteMMProxy(conn, `/api/local/models/aliases/${encodeURIComponent(req.params.alias)}`, 'DELETE');
+      res.json(result);
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   }
 });
 
@@ -433,8 +515,8 @@ app.get('/api/:connId/models/fallbacks', async (req, res) => {
       const raw = await run('openclaw models fallbacks list --json');
       res.json({ ok: true, data: tryJsonParse(raw) || raw });
     } else {
-      const result = await gatewayRpc(conn, 'models.status', {}, 10000);
-      res.json({ ok: true, data: result?.fallbacks || [] });
+      const result = await remoteMMProxy(conn, '/api/local/models/fallbacks');
+      res.json({ ok: true, data: result.data || result });
     }
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -453,7 +535,10 @@ app.post('/api/:connId/models/fallbacks', async (req, res) => {
       res.json({ ok: true, message: out || `Fallback added: ${model}` });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   } else {
-    res.status(501).json({ ok: false, error: 'Fallback management not yet supported remotely' });
+    try {
+      const result = await remoteMMProxy(conn, '/api/local/models/fallbacks', 'POST', { model });
+      res.json(result);
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   }
 });
 
@@ -467,7 +552,10 @@ app.delete('/api/:connId/models/fallbacks/:model', async (req, res) => {
       res.json({ ok: true, message: out || 'Fallback removed' });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   } else {
-    res.status(501).json({ ok: false, error: 'Fallback management not yet supported remotely' });
+    try {
+      const result = await remoteMMProxy(conn, `/api/local/models/fallbacks/${encodeURIComponent(req.params.model)}`, 'DELETE');
+      res.json(result);
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   }
 });
 
@@ -481,7 +569,10 @@ app.delete('/api/:connId/models/fallbacks', async (req, res) => {
       res.json({ ok: true, message: out || 'Fallbacks cleared' });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   } else {
-    res.status(501).json({ ok: false, error: 'Fallback management not yet supported remotely' });
+    try {
+      const result = await remoteMMProxy(conn, '/api/local/models/fallbacks', 'DELETE');
+      res.json(result);
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   }
 });
 
@@ -533,9 +624,8 @@ app.get('/api/:connId/models/available', async (req, res) => {
       }));
       res.json({ ok: true, models });
     } else {
-      const result = await gatewayRpc(conn, 'models.status', {}, 10000);
-      const allowed = result?.allowed || [];
-      res.json({ ok: true, models: allowed.map(m => ({ key: m, name: m, local: false, tags: [] })) });
+      const result = await remoteMMProxy(conn, '/api/local/models/available');
+      res.json({ ok: true, models: result.models || [] });
     }
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -579,10 +669,10 @@ app.get('/api/:connId/auth/profiles', async (req, res) => {
       res.status(500).json({ ok: false, error: e.message });
     }
   } else {
-    // Remote: try to get auth info from models.status
+    // Remote: proxy through remote Model Manager
     try {
-      const result = await gatewayRpc(conn, 'models.status', {}, 10000);
-      res.json({ ok: true, data: { remote: { auth: result?.auth || {} } } });
+      const result = await remoteMMProxy(conn, '/api/local/auth/profiles');
+      res.json({ ok: true, data: result.data || result });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
     }
