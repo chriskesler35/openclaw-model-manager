@@ -1626,7 +1626,7 @@ async function refreshProviderStatus() {
   if (!container) return;
 
   try {
-    const res = await api('GET', '/api/providers/status');
+    const res = await capi('GET', '/providers/status');
     if (!res.ok) return;
 
     const { primary, fallbacks, providers } = res;
@@ -1731,7 +1731,7 @@ async function failoverTo(model) {
   if (!confirm(`Switch primary model to ${model}?\n\nThis takes effect immediately — no gateway restart needed.`)) return;
 
   try {
-    const res = await api('POST', '/api/failover', { model });
+    const res = await capi('POST', '/failover', { model });
     if (res.ok) {
       toast(`⚡ Switched to ${model} — ${res.note}`, 'success');
       refreshProviderStatus();
@@ -1746,7 +1746,7 @@ async function failoverTo(model) {
 
 async function clearCooldown(provider) {
   try {
-    const res = await api('POST', '/api/providers/clear-cooldown', { provider });
+    const res = await capi('POST', '/providers/clear-cooldown', { provider });
     if (res.ok) {
       toast(`✅ ${res.message}`, 'success');
       refreshProviderStatus();
