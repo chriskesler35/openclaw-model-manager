@@ -1435,14 +1435,21 @@ app.get('/api/:connId/providers/status', async (req, res) => {
 
   // Local — fall through to original logic
   try {
-    const authProfiles = readJsonFile(AUTH_PROFILES);
     const config = readJsonFile(OPENCLAW_CONFIG);
-    if (!authProfiles || !config) return res.json({ ok: false, error: 'Could not read config files' });
+    const authProfiles = readJsonFile(AUTH_PROFILES);
+
+    // Gracefully handle missing files (e.g. OpenClaw not installed locally)
+    const primary = config?.agents?.defaults?.model?.primary || 'unknown';
+    const fallbacks = config?.agents?.defaults?.model?.fallbacks || [];
+
+    if (!config && !authProfiles) {
+      // No OpenClaw installed locally — return empty but valid response
+      return res.json({ ok: true, primary: 'none', fallbacks: [], providers: {},
+        note: 'No local OpenClaw config found. Use a remote connection to manage models.' });
+    }
 
     const now = Date.now();
-    const stats = authProfiles.usageStats || {};
-    const primary = config.agents?.defaults?.model?.primary || 'unknown';
-    const fallbacks = config.agents?.defaults?.model?.fallbacks || [];
+    const stats = authProfiles?.usageStats || {};
 
     const providers = {};
     for (const [profileId, s] of Object.entries(stats)) {
@@ -1472,14 +1479,19 @@ app.get('/api/:connId/providers/status', async (req, res) => {
 // Legacy non-connection-aware route
 app.get('/api/providers/status', (req, res) => {
   try {
-    const authProfiles = readJsonFile(AUTH_PROFILES);
     const config = readJsonFile(OPENCLAW_CONFIG);
-    if (!authProfiles || !config) return res.json({ ok: false, error: 'Could not read config files' });
+    const authProfiles = readJsonFile(AUTH_PROFILES);
+
+    const primary = config?.agents?.defaults?.model?.primary || 'unknown';
+    const fallbacks = config?.agents?.defaults?.model?.fallbacks || [];
+
+    if (!config && !authProfiles) {
+      return res.json({ ok: true, primary: 'none', fallbacks: [], providers: {},
+        note: 'No local OpenClaw config found.' });
+    }
 
     const now = Date.now();
-    const stats = authProfiles.usageStats || {};
-    const primary = config.agents?.defaults?.model?.primary || 'unknown';
-    const fallbacks = config.agents?.defaults?.model?.fallbacks || [];
+    const stats = authProfiles?.usageStats || {};
 
     const providers = {};
     for (const [profileId, s] of Object.entries(stats)) {
