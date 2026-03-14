@@ -5,6 +5,8 @@ let lastGatewayData = null;
 let lastModelsData = null;
 let ws = null;
 let statsInterval = null;
+let wsReconnectAttempts = 0;
+let wsReconnectTimer = null;
 
 window.addEventListener('unhandledrejection', e => {
   console.error('Unhandled promise rejection:', e.reason);
@@ -61,6 +63,28 @@ async function api(method, path, body) {
 
 function capi(method, path, body) {
   return api(method, `/api/${activeConnId}${path}`, body);
+}
+
+async function apiWithRetry(method, path, body, maxRetries = 2, delayMs = 1000) {
+  // Only retry GET requests
+  if (method !== 'GET') return api(method, path, body);
+  let lastResult;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    lastResult = await api(method, path, body);
+    // Don't retry on success or 4xx client errors
+    if (!lastResult.code || (lastResult.code !== 'NETWORK_ERROR' && lastResult.code !== 'PARSE_ERROR')) return lastResult;
+    // Check for retryable HTTP status codes (stored in error text)
+    const errText = lastResult.error || '';
+    const is5xxRetryable = /\b50[234]\b/.test(errText);
+    const isNetworkErr = lastResult.code === 'NETWORK_ERROR';
+    if (!isNetworkErr && !is5xxRetryable) return lastResult;
+    if (attempt < maxRetries) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
+  }
+  return lastResult;
+}
+
+function capiRetry(path) {
+  return apiWithRetry('GET', `/api/${activeConnId}${path}`);
 }
 
 function toast(msg, type = 'info') {
@@ -172,7 +196,7 @@ function refreshAll() {
 // Full status (for health tab — can take ~6-8s)
 async function fetchGatewayStatusFull() {
   try {
-    const res = await capi('GET', '/gateway/status');
+    const res = await capiRetry('/gateway/status');
     if (res.ok) {
       lastGatewayData = res.status;
       updateGatewayUI(res.status);
@@ -182,9 +206,36 @@ async function fetchGatewayStatusFull() {
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
+
+function showWsStatus(connected) {
+  let el = byId('ws-status');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'ws-status';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:var(--danger);color:#fff;text-align:center;padding:4px 8px;font-size:12px;display:none';
+    document.body.prepend(el);
+  }
+  if (connected) {
+    el.style.display = 'none';
+  } else {
+    el.textContent = 'Connection lost — reconnecting…';
+    el.style.display = 'block';
+  }
+}
+
 function connectWebSocket() {
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    const wasReconnect = wsReconnectAttempts > 0;
+    wsReconnectAttempts = 0;
+    showWsStatus(true);
+    if (wasReconnect) refreshAll();
+  };
+
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
@@ -201,8 +252,15 @@ function connectWebSocket() {
       }
     } catch {}
   };
-  ws.onclose = () => setTimeout(connectWebSocket, 3000);
-  ws.onerror = () => ws.close();
+
+  ws.onclose = () => {
+    showWsStatus(false);
+    const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts), 30000);
+    wsReconnectAttempts++;
+    wsReconnectTimer = setTimeout(connectWebSocket, delay);
+  };
+
+  ws.onerror = () => { try { ws.close(); } catch {} };
 }
 
 // ── Gateway UI ───────────────────────────────────────────────────────────────
@@ -364,7 +422,7 @@ async function refreshHealth() {
 
   // 7. Local Models Summary
   try {
-    const lmRes = await api('GET', '/api/system/local-models');
+    const lmRes = await apiWithRetry('GET', '/api/system/local-models');
     if (lmRes?.ok && lmRes.data) {
       const { models, system } = lmRes.data;
       const compatible = models.filter(m => m.status === 'compatible').length;
@@ -433,7 +491,7 @@ async function gatewayAction(action) {
 
 async function refreshModels() {
   try {
-    const res = await capi('GET', '/models/status');
+    const res = await capiRetry('/models/status');
     if (res.ok && res.data) {
       lastModelsData = res.data;
       const d = res.data;
@@ -479,7 +537,7 @@ async function refreshModelList() {
   const container = byId('model-list');
 
   try {
-    const res = await capi('GET', `/models/list?all=${showAll}`);
+    const res = await capiRetry(`/models/list?all=${showAll}`);
     let models = [];
 
     if (res.ok && res.data) {
@@ -545,8 +603,8 @@ async function refreshFallbacks() {
 
   // Load fallbacks and available models in parallel
   const [fbRes, modRes] = await Promise.all([
-    capi('GET', '/models/fallbacks'),
-    capi('GET', '/models/available'),
+    capiRetry('/models/fallbacks'),
+    capiRetry('/models/available'),
   ]);
 
   // Parse fallbacks
@@ -763,7 +821,7 @@ async function clearFallbacks() {
 async function refreshAliases() {
   const container = byId('alias-list');
   try {
-    const res = await capi('GET', '/models/aliases');
+    const res = await capiRetry('/models/aliases');
     if (res.ok && res.data) {
       let entries = [];
       if (Array.isArray(res.data)) {
@@ -817,7 +875,7 @@ async function removeAlias(alias) {
 async function refreshAuth() {
   const container = byId('auth-profiles');
   try {
-    const res = await capi('GET', '/auth/profiles');
+    const res = await capiRetry('/auth/profiles');
     if (res.ok && res.data) {
       const allCards = [];
       for (const [agentId, agentData] of Object.entries(res.data)) {
@@ -888,7 +946,7 @@ async function refreshCredentials() {
   if (!container) return;
   
   try {
-    const res = await api('GET', '/api/credentials/status');
+    const res = await apiWithRetry('GET', '/api/credentials/status');
     if (!res.ok) {
       container.innerHTML = `<div class="empty-state">${esc(res.error || 'Could not load credentials')}</div>`;
       return;
@@ -1648,7 +1706,7 @@ async function refreshProviderStatus() {
   if (!container) return;
 
   try {
-    const res = await capi('GET', '/providers/status');
+    const res = await capiRetry('/providers/status');
     if (!res.ok) return;
 
     const { primary, fallbacks, providers } = res;
@@ -1796,7 +1854,7 @@ async function refreshSystemStats() {
   if (!container) return;
 
   try {
-    const res = await capi('GET', '/system/stats');
+    const res = await capiRetry('/system/stats');
     if (!res?.ok || !res.data) return;
 
     const { gpus, ram } = res.data;
@@ -1959,8 +2017,8 @@ async function refreshLocalModels() {
 
   // Fetch system info and local models in parallel (connection-aware)
   const [sysRes, modelsRes] = await Promise.all([
-    capi('GET', '/system/info').catch(() => null),
-    capi('GET', '/system/local-models').catch(() => null),
+    capiRetry('/system/info').catch(() => null),
+    capiRetry('/system/local-models').catch(() => null),
   ]);
 
   // Show remote source info if applicable

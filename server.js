@@ -70,6 +70,17 @@ function tryJsonParse(str) {
   try { return JSON.parse(str); } catch { return null; }
 }
 
+// Track consecutive RPC failures per connection
+const rpcFailures = new Map();
+
+function recordRpcFailure(connId) {
+  rpcFailures.set(connId, (rpcFailures.get(connId) || 0) + 1);
+}
+
+function recordRpcSuccess(connId) {
+  rpcFailures.set(connId, 0);
+}
+
 // Remote gateway RPC via WebSocket (one-shot request/response)
 function gatewayRpc(conn, method, params = {}, timeoutMs) {
   const effectiveTimeout = timeoutMs || conn.timeoutMs || 15000;
@@ -86,6 +97,7 @@ function gatewayRpc(conn, method, params = {}, timeoutMs) {
 
     const timer = setTimeout(() => {
       ws.close();
+      recordRpcFailure(conn.id);
       reject(new Error(`RPC timeout (${effectiveTimeout}ms)`));
     }, effectiveTimeout);
 
@@ -127,6 +139,7 @@ function gatewayRpc(conn, method, params = {}, timeoutMs) {
           if (!msg.ok) {
             clearTimeout(timer);
             ws.close();
+            recordRpcFailure(conn.id);
             reject(new Error(`Gateway auth failed: ${JSON.stringify(msg.payload || msg.error || 'unknown')}`));
             return;
           }
@@ -140,8 +153,8 @@ function gatewayRpc(conn, method, params = {}, timeoutMs) {
         if (connected && (msg.id === reqId || msg.id === 1)) {
           clearTimeout(timer);
           ws.close();
-          if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
-          else resolve(msg.result);
+          if (msg.error) { recordRpcFailure(conn.id); reject(new Error(msg.error.message || JSON.stringify(msg.error))); }
+          else { recordRpcSuccess(conn.id); resolve(msg.result); }
           return;
         }
 
@@ -156,6 +169,7 @@ function gatewayRpc(conn, method, params = {}, timeoutMs) {
     ws.on('error', (e) => {
       clearTimeout(timer);
       try { ws.close(); } catch {}
+      recordRpcFailure(conn.id);
       reject(new Error(`WebSocket error: ${e.message}`));
     });
 
@@ -293,13 +307,15 @@ app.get('/api/connections/:id/health', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.id);
   if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
+  const consecutiveFailures = rpcFailures.get(req.params.id) || 0;
+
   if (conn.type === 'local') {
     try {
       const raw = await run('openclaw gateway status --json');
       const parsed = tryJsonParse(raw);
-      res.json({ ok: true, status: parsed || raw });
+      res.json({ ok: true, status: parsed || raw, rpcConsecutiveFailures: consecutiveFailures });
     } catch (e) {
-      res.json({ ok: true, status: { running: false, error: e.message, stdout: e.stdout } });
+      res.json({ ok: true, status: { running: false, error: e.message, stdout: e.stdout }, rpcConsecutiveFailures: consecutiveFailures });
     }
     return;
   }
@@ -307,14 +323,14 @@ app.get('/api/connections/:id/health', asyncHandler(async (req, res) => {
   // Remote: try remote Model Manager first, fallback to HTTP health
   try {
     const result = await remoteMMProxy(conn, '/api/local/gateway/status');
-    res.json({ ok: true, status: { running: true, proxy: true, ...(result.status || result) } });
+    res.json({ ok: true, status: { running: true, proxy: true, ...(result.status || result) }, rpcConsecutiveFailures: consecutiveFailures });
   } catch (proxyErr) {
     // Fallback to HTTP health check
     const httpRes = await httpHealthCheck(conn);
     if (httpRes.ok) {
-      res.json({ ok: true, status: { running: true, proxy: false, http: true } });
+      res.json({ ok: true, status: { running: true, proxy: false, http: true }, rpcConsecutiveFailures: consecutiveFailures });
     } else {
-      res.json({ ok: true, status: { running: false, proxy: false, proxyError: proxyErr.message, httpError: httpRes.error } });
+      res.json({ ok: true, status: { running: false, proxy: false, proxyError: proxyErr.message, httpError: httpRes.error }, rpcConsecutiveFailures: consecutiveFailures });
     }
   }
 });
@@ -1824,70 +1840,84 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 let statusInterval = null;
 
 function broadcastStatus() {
-  if (wss.clients.size === 0) return;
-  const data = loadConnections();
+  try {
+    if (wss.clients.size === 0) return;
+    const data = loadConnections();
 
-  for (const conn of data.connections) {
-    if (conn.type === 'local') {
-      // Use HTTP /health endpoint instead of raw WS connect/disconnect
-      // (WS probe causes "closed before connect" spam in gateway logs)
-      const port = conn.port || 18789;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 3000);
+    for (const conn of data.connections) {
+      if (conn.type === 'local') {
+        // Use HTTP /health endpoint instead of raw WS connect/disconnect
+        // (WS probe causes "closed before connect" spam in gateway logs)
+        const port = conn.port || 18789;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3000);
 
-      fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
-        .then(r => {
-          clearTimeout(timer);
-          const payload = JSON.stringify({
-            type: 'gateway-status', connId: conn.id,
-            data: { running: r.ok, rpc: { ok: r.ok }, port: { status: 'busy' }, gateway: { bindHost: '0.0.0.0', port } }
+        fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
+          .then(r => {
+            clearTimeout(timer);
+            const payload = JSON.stringify({
+              type: 'gateway-status', connId: conn.id,
+              data: { running: r.ok, rpc: { ok: r.ok }, port: { status: 'busy' }, gateway: { bindHost: '0.0.0.0', port } }
+            });
+            for (const client of wss.clients) {
+              if (client.readyState === 1) client.send(payload);
+            }
+          })
+          .catch(() => {
+            clearTimeout(timer);
+            const payload = JSON.stringify({
+              type: 'gateway-status', connId: conn.id,
+              data: { running: false }
+            });
+            for (const client of wss.clients) {
+              if (client.readyState === 1) client.send(payload);
+            }
           });
-          for (const client of wss.clients) {
-            if (client.readyState === 1) client.send(payload);
-          }
+      } else {
+        // Remote: use HTTP /health to avoid WS log spam on remote gateway too
+        const proto = conn.tls ? 'https' : 'http';
+        const url = `${proto}://${conn.host}:${conn.port}/health`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 4000);
+
+        fetch(url, {
+          signal: controller.signal,
+          headers: conn.token ? { 'Authorization': `Bearer ${conn.token}` } : {},
         })
-        .catch(() => {
-          clearTimeout(timer);
-          const payload = JSON.stringify({
-            type: 'gateway-status', connId: conn.id,
-            data: { running: false }
-          });
-          for (const client of wss.clients) {
-            if (client.readyState === 1) client.send(payload);
-          }
+          .then(r => {
+            clearTimeout(timer);
+            const payload = JSON.stringify({
+              type: 'gateway-status', connId: conn.id,
+              data: { running: r.ok, host: conn.host, port: conn.port }
+            });
+            for (const client of wss.clients) {
+              if (client.readyState === 1) client.send(payload);
+            }
+          })
+          .catch(() => {
+            clearTimeout(timer);
+            const payload = JSON.stringify({
+              type: 'gateway-status', connId: conn.id,
+              data: { running: false, host: conn.host, port: conn.port }
+            });
+            for (const client of wss.clients) {
+              if (client.readyState === 1) client.send(payload);
+            }
         });
-    } else {
-      // Remote: use HTTP /health to avoid WS log spam on remote gateway too
-      const proto = conn.tls ? 'https' : 'http';
-      const url = `${proto}://${conn.host}:${conn.port}/health`;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 4000);
-
-      fetch(url, {
-        signal: controller.signal,
-        headers: conn.token ? { 'Authorization': `Bearer ${conn.token}` } : {},
-      })
-        .then(r => {
-          clearTimeout(timer);
-          const payload = JSON.stringify({
-            type: 'gateway-status', connId: conn.id,
-            data: { running: r.ok, host: conn.host, port: conn.port }
-          });
-          for (const client of wss.clients) {
-            if (client.readyState === 1) client.send(payload);
-          }
-        })
-        .catch(() => {
-          clearTimeout(timer);
-          const payload = JSON.stringify({
-            type: 'gateway-status', connId: conn.id,
-            data: { running: false, host: conn.host, port: conn.port }
-          });
-          for (const client of wss.clients) {
-            if (client.readyState === 1) client.send(payload);
-          }
-      });
+      }
     }
+  } catch (e) {
+    // Broadcast degraded status so clients know something is wrong
+    console.error('[broadcastStatus] error:', e.message);
+    try {
+      const payload = JSON.stringify({
+        type: 'gateway-status', connId: 'local',
+        data: { running: false, degraded: true, error: e.message }
+      });
+      for (const client of wss.clients) {
+        if (client.readyState === 1) client.send(payload);
+      }
+    } catch {}
   }
 }
 
