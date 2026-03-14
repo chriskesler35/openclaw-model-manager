@@ -514,8 +514,14 @@ app.get('/api/:connId/models/aliases', asyncHandler(async (req, res) => {
 
   try {
     if (conn.type === 'local') {
-      const raw = await run('openclaw models aliases list --json');
-      res.json({ ok: true, data: tryJsonParse(raw) || raw });
+      const config = readJsonFile(OPENCLAW_CONFIG);
+      if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read OpenClaw config');
+      const models = config?.agents?.defaults?.models || {};
+      const aliases = {};
+      for (const [key, val] of Object.entries(models)) {
+        if (val?.alias) aliases[val.alias] = key;
+      }
+      res.json({ ok: true, data: { aliases } });
     } else {
       const result = await remoteMMProxy(conn, '/api/local/models/aliases');
       res.json({ ok: true, data: result.data || result });
@@ -570,8 +576,10 @@ app.get('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
 
   try {
     if (conn.type === 'local') {
-      const raw = await run('openclaw models fallbacks list --json');
-      res.json({ ok: true, data: tryJsonParse(raw) || raw });
+      const config = readJsonFile(OPENCLAW_CONFIG);
+      if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read OpenClaw config');
+      const fallbacks = config?.agents?.defaults?.model?.fallbacks || [];
+      res.json({ ok: true, data: { fallbacks } });
     } else {
       const result = await remoteMMProxy(conn, '/api/local/models/fallbacks');
       res.json({ ok: true, data: result.data || result });
