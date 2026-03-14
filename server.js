@@ -40,12 +40,27 @@ function getConnection(id) {
   return data.connections.find(c => c.id === id);
 }
 
+// ── Error Handling Helpers ────────────────────────────────────────────────────
+
+function apiError(res, status, code, message, details) {
+  res.status(status).json({ ok: false, error: message, code, ...(details ? { details } : {}) });
+}
+
+const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function run(cmd, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     exec(cmd, { timeout: timeoutMs, shell: 'powershell.exe' }, (err, stdout, stderr) => {
-      if (err) return reject({ code: err.code, message: stderr || err.message, stdout });
+      if (stderr) console.error(`[run stderr] ${stderr.trim()}`);
+      if (err) {
+        const e = new Error(stderr?.trim() || stdout?.trim() || err.message);
+        e.code = err.code;
+        e.stdout = stdout;
+        e.stderr = stderr;
+        return reject(e);
+      }
       resolve(stdout.trim());
     });
   });
@@ -140,6 +155,7 @@ function gatewayRpc(conn, method, params = {}, timeoutMs) {
 
     ws.on('error', (e) => {
       clearTimeout(timer);
+      try { ws.close(); } catch {}
       reject(new Error(`WebSocket error: ${e.message}`));
     });
 
@@ -197,7 +213,7 @@ function remoteFlags(conn) {
 
 // ── Connection CRUD ──────────────────────────────────────────────────────────
 
-app.get('/api/connections', (req, res) => {
+app.get('/api/connections', asyncHandler(async (req, res) => {
   const data = loadConnections();
   // Redact tokens for display
   const safe = data.connections.map(c => ({
@@ -206,16 +222,16 @@ app.get('/api/connections', (req, res) => {
     password: c.password ? '••••' : null,
   }));
   res.json({ ok: true, connections: safe });
-});
+}));
 
-app.post('/api/connections', (req, res) => {
+app.post('/api/connections', asyncHandler(async (req, res) => {
   const { name, host, port, token, password, tls, mmPort, ollamaPort, timeoutMs } = req.body;
-  if (!name || !host) return res.status(400).json({ ok: false, error: 'name and host required' });
+  if (!name || !host) return apiError(res, 400, 'VALIDATION_ERROR', 'name and host required');
 
   const data = loadConnections();
   const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/,'');
   if (data.connections.find(c => c.id === id)) {
-    return res.status(409).json({ ok: false, error: `Connection "${id}" already exists` });
+    return apiError(res, 409, 'CONFLICT', `Connection "${id}" already exists`);
   }
 
   data.connections.push({
@@ -234,12 +250,12 @@ app.post('/api/connections', (req, res) => {
   });
   saveConnections(data);
   res.json({ ok: true, id });
-});
+}));
 
-app.put('/api/connections/:id', (req, res) => {
+app.put('/api/connections/:id', asyncHandler(async (req, res) => {
   const data = loadConnections();
   const conn = data.connections.find(c => c.id === req.params.id);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Not found');
 
   const { name, host, port, token, password, tls, mmPort, ollamaPort, timeoutMs } = req.body;
   if (name) conn.name = name;
@@ -254,28 +270,28 @@ app.put('/api/connections/:id', (req, res) => {
 
   saveConnections(data);
   res.json({ ok: true });
-});
+}));
 
-app.delete('/api/connections/:id', (req, res) => {
+app.delete('/api/connections/:id', asyncHandler(async (req, res) => {
   const data = loadConnections();
-  if (req.params.id === 'local') return res.status(400).json({ ok: false, error: 'Cannot delete local connection' });
+  if (req.params.id === 'local') return apiError(res, 400, 'VALIDATION_ERROR', 'Cannot delete local connection');
   data.connections = data.connections.filter(c => c.id !== req.params.id);
   saveConnections(data);
   res.json({ ok: true });
-});
+}));
 
-app.post('/api/connections/:id/default', (req, res) => {
+app.post('/api/connections/:id/default', asyncHandler(async (req, res) => {
   const data = loadConnections();
   data.connections.forEach(c => c.default = (c.id === req.params.id));
   saveConnections(data);
   res.json({ ok: true });
-});
+}));
 
 // ── Connection Health Check ──────────────────────────────────────────────────
 
-app.get('/api/connections/:id/health', async (req, res) => {
+app.get('/api/connections/:id/health', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.id);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
@@ -305,9 +321,9 @@ app.get('/api/connections/:id/health', async (req, res) => {
 
 // ── Gateway Control (connection-aware) ───────────────────────────────────────
 
-app.get('/api/:connId/gateway/status', async (req, res) => {
+app.get('/api/:connId/gateway/status', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
@@ -333,13 +349,13 @@ app.get('/api/:connId/gateway/status', async (req, res) => {
   }
 });
 
-app.post('/api/:connId/gateway/:action', async (req, res) => {
+app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
   const action = req.params.action;
 
   if (!['start', 'stop', 'restart'].includes(action)) {
-    return res.status(400).json({ ok: false, error: 'Invalid action' });
+    return apiError(res, 400, 'VALIDATION_ERROR', 'Invalid action');
   }
 
   if (conn.type === 'local') {
@@ -347,7 +363,7 @@ app.post('/api/:connId/gateway/:action', async (req, res) => {
       const out = await run(`openclaw gateway ${action}`, 20000);
       res.json({ ok: true, message: out || `Gateway ${action} requested` });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message, stdout: e.stdout });
+      apiError(res, 500, 'GATEWAY_ERROR', e.message, { stdout: e.stdout });
     }
   } else {
     // Remote: for restart, try RPC signal; start/stop need SSH or remote agent
@@ -361,7 +377,7 @@ app.post('/api/:connId/gateway/:action', async (req, res) => {
           const out = await run(`openclaw gateway call restart${remoteFlags(conn)}`, 15000);
           res.json({ ok: true, message: out || 'Restart requested via CLI' });
         } catch (e2) {
-          res.status(500).json({ ok: false, error: `RPC: ${e.message}. CLI: ${e2.message}` });
+          apiError(res, 500, 'GATEWAY_ERROR', `RPC: ${e.message}. CLI: ${e2.message}`);
         }
       }
     } else {
@@ -370,11 +386,7 @@ app.post('/api/:connId/gateway/:action', async (req, res) => {
         const out = await run(`openclaw gateway ${action}${remoteFlags(conn)}`, 15000);
         res.json({ ok: true, message: out || `Gateway ${action} requested` });
       } catch (e) {
-        res.status(500).json({
-          ok: false,
-          error: e.message,
-          hint: `Remote ${action} may require SSH access or a remote agent. Configure SSH tunnel or run openclaw on the remote host.`,
-        });
+        apiError(res, 500, 'GATEWAY_ERROR', e.message, { hint: `Remote ${action} may require SSH access or a remote agent. Configure SSH tunnel or run openclaw on the remote host.` });
       }
     }
   }
@@ -382,30 +394,30 @@ app.post('/api/:connId/gateway/:action', async (req, res) => {
 
 // ── Models (connection-aware) ────────────────────────────────────────────────
 
-app.get('/api/:connId/models/status', async (req, res) => {
+app.get('/api/:connId/models/status', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
       const raw = await run('openclaw models status --json');
       res.json({ ok: true, data: tryJsonParse(raw) || raw });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   } else {
     try {
       const result = await remoteMMProxy(conn, '/api/local/models/status');
       res.json({ ok: true, data: result.data || result });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 });
 
-app.get('/api/:connId/models/list', async (req, res) => {
+app.get('/api/:connId/models/list', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
@@ -413,7 +425,7 @@ app.get('/api/:connId/models/list', async (req, res) => {
       const raw = await run(`openclaw models list --json${flag}`);
       res.json({ ok: true, data: tryJsonParse(raw) || raw });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   } else {
     try {
@@ -421,39 +433,39 @@ app.get('/api/:connId/models/list', async (req, res) => {
       const result = await remoteMMProxy(conn, `/api/local/models/list${allFlag}`);
       res.json({ ok: true, data: result.data || result });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 });
 
-app.post('/api/:connId/models/set', async (req, res) => {
+app.post('/api/:connId/models/set', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
   const { model } = req.body;
-  if (!model) return res.status(400).json({ ok: false, error: 'model is required' });
+  if (!model) return apiError(res, 400, 'VALIDATION_ERROR', 'model is required');
 
   if (conn.type === 'local') {
     try {
       const out = await run(`openclaw models set "${model}"`);
       res.json({ ok: true, message: out || `Model set to ${model}` });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   } else {
     try {
       const result = await remoteMMProxy(conn, '/api/local/models/set', 'POST', { model });
       res.json({ ok: true, message: result.message || `Model set to ${model}`, result });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 });
 
 // ── Aliases (connection-aware, local only for now) ───────────────────────────
 
-app.get('/api/:connId/models/aliases', async (req, res) => {
+app.get('/api/:connId/models/aliases', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   try {
     if (conn.type === 'local') {
@@ -464,51 +476,51 @@ app.get('/api/:connId/models/aliases', async (req, res) => {
       res.json({ ok: true, data: result.data || result });
     }
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
-app.post('/api/:connId/models/aliases', async (req, res) => {
+app.post('/api/:connId/models/aliases', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
   const { alias, model } = req.body;
-  if (!alias || !model) return res.status(400).json({ ok: false, error: 'alias and model required' });
+  if (!alias || !model) return apiError(res, 400, 'VALIDATION_ERROR', 'alias and model required');
 
   if (conn.type === 'local') {
     try {
       const out = await run(`openclaw models aliases add "${alias}" "${model}"`);
       res.json({ ok: true, message: out || `Alias ${alias} → ${model}` });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   } else {
     try {
       const result = await remoteMMProxy(conn, '/api/local/models/aliases', 'POST', { alias, model });
       res.json(result);
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
 });
 
-app.delete('/api/:connId/models/aliases/:alias', async (req, res) => {
+app.delete('/api/:connId/models/aliases/:alias', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
       const out = await run(`openclaw models aliases remove "${req.params.alias}"`);
       res.json({ ok: true, message: out || 'Alias removed' });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   } else {
     try {
       const result = await remoteMMProxy(conn, `/api/local/models/aliases/${encodeURIComponent(req.params.alias)}`, 'DELETE');
       res.json(result);
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
 });
 
 // ── Fallbacks (connection-aware, local only for now) ─────────────────────────
 
-app.get('/api/:connId/models/fallbacks', async (req, res) => {
+app.get('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   try {
     if (conn.type === 'local') {
@@ -519,75 +531,75 @@ app.get('/api/:connId/models/fallbacks', async (req, res) => {
       res.json({ ok: true, data: result.data || result });
     }
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
-app.post('/api/:connId/models/fallbacks', async (req, res) => {
+app.post('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
   const { model } = req.body;
-  if (!model) return res.status(400).json({ ok: false, error: 'model is required' });
+  if (!model) return apiError(res, 400, 'VALIDATION_ERROR', 'model is required');
 
   if (conn.type === 'local') {
     try {
       const out = await run(`openclaw models fallbacks add "${model}"`);
       res.json({ ok: true, message: out || `Fallback added: ${model}` });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   } else {
     try {
       const result = await remoteMMProxy(conn, '/api/local/models/fallbacks', 'POST', { model });
       res.json(result);
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
 });
 
-app.delete('/api/:connId/models/fallbacks/:model', async (req, res) => {
+app.delete('/api/:connId/models/fallbacks/:model', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
       const out = await run(`openclaw models fallbacks remove "${req.params.model}"`);
       res.json({ ok: true, message: out || 'Fallback removed' });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   } else {
     try {
       const result = await remoteMMProxy(conn, `/api/local/models/fallbacks/${encodeURIComponent(req.params.model)}`, 'DELETE');
       res.json(result);
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
 });
 
-app.delete('/api/:connId/models/fallbacks', async (req, res) => {
+app.delete('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
       const out = await run('openclaw models fallbacks clear');
       res.json({ ok: true, message: out || 'Fallbacks cleared' });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   } else {
     try {
       const result = await remoteMMProxy(conn, '/api/local/models/fallbacks', 'DELETE');
       res.json(result);
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+    } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
 });
 
 // Save entire fallback list (reorder/bulk edit)
-app.put('/api/:connId/models/fallbacks', async (req, res) => {
+app.put('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
-  if (conn.type !== 'local') return res.status(501).json({ ok: false, error: 'Not supported remotely' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
+  if (conn.type !== 'local') return apiError(res, 501, 'NOT_IMPLEMENTED', 'Not supported remotely');
 
   const { fallbacks } = req.body;
-  if (!Array.isArray(fallbacks)) return res.status(400).json({ ok: false, error: 'fallbacks must be an array' });
+  if (!Array.isArray(fallbacks)) return apiError(res, 400, 'VALIDATION_ERROR', 'fallbacks must be an array');
 
   try {
     const config = readJsonFile(OPENCLAW_CONFIG);
-    if (!config) return res.status(500).json({ ok: false, error: 'Could not read config' });
+    if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read config');
 
     if (!config.agents?.defaults?.model) {
       config.agents = config.agents || {};
@@ -603,14 +615,14 @@ app.put('/api/:connId/models/fallbacks', async (req, res) => {
       warning: 'The gateway needs to be restarted for changes to take effect. If a conversation is active, wait until it finishes.',
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // Get all available models (for fallback dropdown)
-app.get('/api/:connId/models/available', async (req, res) => {
+app.get('/api/:connId/models/available', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   try {
     if (conn.type === 'local') {
@@ -628,15 +640,15 @@ app.get('/api/:connId/models/available', async (req, res) => {
       res.json({ ok: true, models: result.models || [] });
     }
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // ── Auth Profiles ────────────────────────────────────────────────────────────
 
-app.get('/api/:connId/auth/profiles', async (req, res) => {
+app.get('/api/:connId/auth/profiles', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
@@ -666,7 +678,7 @@ app.get('/api/:connId/auth/profiles', async (req, res) => {
       }
       res.json({ ok: true, data: profiles });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   } else {
     // Remote: proxy through remote Model Manager
@@ -674,26 +686,26 @@ app.get('/api/:connId/auth/profiles', async (req, res) => {
       const result = await remoteMMProxy(conn, '/api/local/auth/profiles');
       res.json({ ok: true, data: result.data || result });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 });
 
 // ── Probe ────────────────────────────────────────────────────────────────────
 
-app.post('/api/:connId/models/probe', async (req, res) => {
+app.post('/api/:connId/models/probe', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
       const raw = await run('openclaw models status --probe --json', 60000);
       res.json({ ok: true, data: tryJsonParse(raw) || raw });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   } else {
-    res.status(501).json({ ok: false, error: 'Probe not yet supported remotely' });
+    apiError(res, 501, 'NOT_IMPLEMENTED', 'Probe not yet supported remotely');
   }
 });
 
@@ -712,7 +724,7 @@ function runCmd(cmd, timeoutMs = 5000) {
 // Cache RAM total (doesn't change between reboots)
 let cachedRamTotalMB = null;
 
-app.get('/api/system/stats', async (req, res) => {
+app.get('/api/system/stats', asyncHandler(async (req, res) => {
   try {
     // Run GPU + RAM queries in parallel for speed
     const [gpuResult, ramFreeResult, ramTotalResult, ollamaPs] = await Promise.allSettled([
@@ -773,21 +785,21 @@ app.get('/api/system/stats', async (req, res) => {
 
     res.json({ ok: true, data: results });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // Connection-scoped stats
-app.get('/api/:connId/system/stats', async (req, res) => {
+app.get('/api/:connId/system/stats', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
       const r = await fetch(`http://127.0.0.1:${PORT}/api/system/stats`);
       return res.json(await r.json());
     } catch (e) {
-      return res.status(500).json({ ok: false, error: e.message });
+      return apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 
@@ -807,7 +819,7 @@ app.get('/api/:connId/system/stats', async (req, res) => {
 
 // ── System Info & Local Models ────────────────────────────────────────────────
 
-app.get('/api/system/info', async (req, res) => {
+app.get('/api/system/info', asyncHandler(async (req, res) => {
   try {
     const results = {};
 
@@ -846,11 +858,11 @@ app.get('/api/system/info', async (req, res) => {
 
     res.json({ ok: true, data: results });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
-app.get('/api/system/local-models', async (req, res) => {
+app.get('/api/system/local-models', asyncHandler(async (req, res) => {
   try {
     // Get Ollama models via API
     const ollamaRes = await fetch('http://127.0.0.1:11434/api/tags');
@@ -1011,15 +1023,15 @@ app.get('/api/system/local-models', async (req, res) => {
       },
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // ── Remote System Info & Local Models ─────────────────────────────────────────
 
-app.get('/api/:connId/system/info', async (req, res) => {
+app.get('/api/:connId/system/info', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     // Redirect to the non-scoped endpoint
@@ -1028,7 +1040,7 @@ app.get('/api/:connId/system/info', async (req, res) => {
       const data = await r.json();
       return res.json(data);
     } catch (e) {
-      return res.status(500).json({ ok: false, error: e.message });
+      return apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 
@@ -1056,9 +1068,9 @@ app.get('/api/:connId/system/info', async (req, res) => {
     hint: `Could not reach Model Manager on ${conn.host}:${mmPort}. Install and run the Model Manager on the remote system for full system info.` });
 });
 
-app.get('/api/:connId/system/local-models', async (req, res) => {
+app.get('/api/:connId/system/local-models', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     try {
@@ -1066,7 +1078,7 @@ app.get('/api/:connId/system/local-models', async (req, res) => {
       const data = await r.json();
       return res.json(data);
     } catch (e) {
-      return res.status(500).json({ ok: false, error: e.message });
+      return apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 
@@ -1176,12 +1188,12 @@ app.get('/api/providers', (req, res) => {
 });
 
 // GET current auth credentials status (no secrets exposed)
-app.get('/api/credentials/status', (req, res) => {
+app.get('/api/credentials/status', asyncHandler(async (req, res) => {
   try {
     const config = readJsonFile(OPENCLAW_CONFIG);
     const authProfiles = readJsonFile(AUTH_PROFILES);
     if (!config || !authProfiles) {
-      return res.json({ ok: false, error: 'Could not read config files' });
+      return apiError(res, 500, 'CONFIG_ERROR', 'Could not read config files');
     }
 
     const providers = {};
@@ -1221,7 +1233,7 @@ app.get('/api/credentials/status', (req, res) => {
 
     res.json({ ok: true, providers });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
@@ -1231,19 +1243,19 @@ function maskKey(key) {
 }
 
 // POST add/update credentials for a provider
-app.post('/api/credentials/save', async (req, res) => {
+app.post('/api/credentials/save', asyncHandler(async (req, res) => {
   try {
     const { provider, key, profileId: customProfileId } = req.body;
     if (!provider || !key) {
-      return res.status(400).json({ ok: false, error: 'Provider and key are required' });
+      return apiError(res, 400, 'VALIDATION_ERROR', 'Provider and key are required');
     }
 
     const provInfo = KNOWN_PROVIDERS[provider];
     if (!provInfo) {
-      return res.status(400).json({ ok: false, error: `Unknown provider: ${provider}. Supported: ${Object.keys(KNOWN_PROVIDERS).join(', ')}` });
+      return apiError(res, 400, 'VALIDATION_ERROR', `Unknown provider: ${provider}. Supported: ${Object.keys(KNOWN_PROVIDERS).join(', ')}`);
     }
     if (provInfo.authMode === 'none') {
-      return res.status(400).json({ ok: false, error: `${provInfo.label} does not require credentials` });
+      return apiError(res, 400, 'VALIDATION_ERROR', `${provInfo.label} does not require credentials`);
     }
 
     // Use CLI paste-token for safety (handles config updates properly)
@@ -1282,21 +1294,21 @@ app.post('/api/credentials/save', async (req, res) => {
       profileId: customProfileId || `${provider}:default`,
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // POST add a new model to the configuration
-app.post('/api/models/add', async (req, res) => {
+app.post('/api/models/add', asyncHandler(async (req, res) => {
   try {
     const { provider, modelId, displayName, contextWindow, alias } = req.body;
     if (!provider || !modelId) {
-      return res.status(400).json({ ok: false, error: 'Provider and model ID are required' });
+      return apiError(res, 400, 'VALIDATION_ERROR', 'Provider and model ID are required');
     }
 
     const fullModelKey = `${provider}/${modelId}`;
     const config = readJsonFile(OPENCLAW_CONFIG);
-    if (!config) return res.status(500).json({ ok: false, error: 'Could not read config' });
+    if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read config');
 
     // Initialize paths if needed
     if (!config.agents) config.agents = { defaults: {} };
@@ -1305,7 +1317,7 @@ app.post('/api/models/add', async (req, res) => {
 
     // Check if model already exists
     if (config.agents.defaults.models[fullModelKey]) {
-      return res.status(409).json({ ok: false, error: `Model ${fullModelKey} already exists in configuration` });
+      return apiError(res, 409, 'CONFLICT', `Model ${fullModelKey} already exists in configuration`);
     }
 
     // Add to agents.defaults.models (the allowed models list)
@@ -1360,22 +1372,22 @@ app.post('/api/models/add', async (req, res) => {
 
     res.json(result);
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // DELETE remove a model from configuration
-app.delete('/api/models/remove', async (req, res) => {
+app.delete('/api/models/remove', asyncHandler(async (req, res) => {
   try {
     const { modelKey } = req.body;
-    if (!modelKey) return res.status(400).json({ ok: false, error: 'modelKey is required' });
+    if (!modelKey) return apiError(res, 400, 'VALIDATION_ERROR', 'modelKey is required');
 
     const config = readJsonFile(OPENCLAW_CONFIG);
-    if (!config) return res.status(500).json({ ok: false, error: 'Could not read config' });
+    if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read config');
 
     // Don't allow removing the primary model
     if (config.agents?.defaults?.model?.primary === modelKey) {
-      return res.status(400).json({ ok: false, error: 'Cannot remove the primary model. Change the primary model first.' });
+      return apiError(res, 400, 'VALIDATION_ERROR', 'Cannot remove the primary model. Change the primary model first.');
     }
 
     // Remove from agents.defaults.models
@@ -1402,12 +1414,12 @@ app.delete('/api/models/remove', async (req, res) => {
       warning: 'The gateway may need to be restarted for changes to take effect.',
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // GET gateway running sessions (to warn before restart)
-app.get('/api/gateway/sessions', async (req, res) => {
+app.get('/api/gateway/sessions', asyncHandler(async (req, res) => {
   try {
     const raw = await run('openclaw sessions list --json', 10000);
     const parsed = tryJsonParse(raw);
@@ -1420,16 +1432,16 @@ app.get('/api/gateway/sessions', async (req, res) => {
 // ── Failover & Cooldown Management ──────────────────────────────────────────
 
 // Get provider cooldown/error status (connection-aware)
-app.get('/api/:connId/providers/status', async (req, res) => {
+app.get('/api/:connId/providers/status', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type !== 'local') {
     try {
       const result = await remoteMMProxy(conn, '/api/local/providers/status');
       return res.json(result);
     } catch (e) {
-      return res.status(500).json({ ok: false, error: e.message });
+      return apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 
@@ -1438,15 +1450,14 @@ app.get('/api/:connId/providers/status', async (req, res) => {
     const config = readJsonFile(OPENCLAW_CONFIG);
     const authProfiles = readJsonFile(AUTH_PROFILES);
 
-    // Gracefully handle missing files (e.g. OpenClaw not installed locally)
-    const primary = config?.agents?.defaults?.model?.primary || 'unknown';
-    const fallbacks = config?.agents?.defaults?.model?.fallbacks || [];
-
     if (!config && !authProfiles) {
-      // No OpenClaw installed locally — return empty but valid response
       return res.json({ ok: true, primary: 'none', fallbacks: [], providers: {},
         note: 'No local OpenClaw config found. Use a remote connection to manage models.' });
     }
+    if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read OpenClaw config');
+
+    const primary = config?.agents?.defaults?.model?.primary || 'unknown';
+    const fallbacks = config?.agents?.defaults?.model?.fallbacks || [];
 
     const now = Date.now();
     const stats = authProfiles?.usageStats || {};
@@ -1472,7 +1483,7 @@ app.get('/api/:connId/providers/status', async (req, res) => {
 
     res.json({ ok: true, primary, fallbacks, providers });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
@@ -1482,13 +1493,14 @@ app.get('/api/providers/status', (req, res) => {
     const config = readJsonFile(OPENCLAW_CONFIG);
     const authProfiles = readJsonFile(AUTH_PROFILES);
 
-    const primary = config?.agents?.defaults?.model?.primary || 'unknown';
-    const fallbacks = config?.agents?.defaults?.model?.fallbacks || [];
-
     if (!config && !authProfiles) {
       return res.json({ ok: true, primary: 'none', fallbacks: [], providers: {},
         note: 'No local OpenClaw config found.' });
     }
+    if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read OpenClaw config');
+
+    const primary = config?.agents?.defaults?.model?.primary || 'unknown';
+    const fallbacks = config?.agents?.defaults?.model?.fallbacks || [];
 
     const now = Date.now();
     const stats = authProfiles?.usageStats || {};
@@ -1514,31 +1526,31 @@ app.get('/api/providers/status', (req, res) => {
 
     res.json({ ok: true, primary, fallbacks, providers });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // Clear cooldown (connection-aware)
-app.post('/api/:connId/providers/clear-cooldown', async (req, res) => {
+app.post('/api/:connId/providers/clear-cooldown', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type !== 'local') {
     try {
       const result = await remoteMMProxy(conn, '/api/local/providers/clear-cooldown', 'POST', req.body);
       return res.json(result);
     } catch (e) {
-      return res.status(500).json({ ok: false, error: e.message });
+      return apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 
   // Local — fall through
   try {
     const { provider } = req.body;
-    if (!provider) return res.status(400).json({ ok: false, error: 'provider is required' });
+    if (!provider) return apiError(res, 400, 'VALIDATION_ERROR', 'provider is required');
 
     const authProfiles = readJsonFile(AUTH_PROFILES);
-    if (!authProfiles) return res.status(500).json({ ok: false, error: 'Could not read auth profiles' });
+    if (!authProfiles) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read auth profiles');
 
     const profileId = `${provider}:default`;
     if (authProfiles.usageStats?.[profileId]) {
@@ -1551,7 +1563,7 @@ app.post('/api/:connId/providers/clear-cooldown', async (req, res) => {
 
     res.json({ ok: true, message: `Cooldown cleared for ${provider}. The provider is ready to use again.` });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
@@ -1559,10 +1571,10 @@ app.post('/api/:connId/providers/clear-cooldown', async (req, res) => {
 app.post('/api/providers/clear-cooldown', (req, res) => {
   try {
     const { provider } = req.body;
-    if (!provider) return res.status(400).json({ ok: false, error: 'provider is required' });
+    if (!provider) return apiError(res, 400, 'VALIDATION_ERROR', 'provider is required');
 
     const authProfiles = readJsonFile(AUTH_PROFILES);
-    if (!authProfiles) return res.status(500).json({ ok: false, error: 'Could not read auth profiles' });
+    if (!authProfiles) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read auth profiles');
 
     const profileId = `${provider}:default`;
     if (authProfiles.usageStats?.[profileId]) {
@@ -1575,28 +1587,28 @@ app.post('/api/providers/clear-cooldown', (req, res) => {
 
     res.json({ ok: true, message: `Cooldown cleared for ${provider}. The provider is ready to use again.` });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // Hot-swap primary model (connection-aware)
-app.post('/api/:connId/failover', async (req, res) => {
+app.post('/api/:connId/failover', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type !== 'local') {
     try {
       const result = await remoteMMProxy(conn, '/api/local/failover', 'POST', req.body);
       return res.json(result);
     } catch (e) {
-      return res.status(500).json({ ok: false, error: e.message });
+      return apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
 
   // Local — fall through
   try {
     const { model } = req.body;
-    if (!model) return res.status(400).json({ ok: false, error: 'model is required' });
+    if (!model) return apiError(res, 400, 'VALIDATION_ERROR', 'model is required');
 
     const out = await run(`openclaw models set "${model}"`, 10000);
     res.json({
@@ -1606,15 +1618,15 @@ app.post('/api/:connId/failover', async (req, res) => {
       output: out,
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
 // Legacy non-connection-aware route
-app.post('/api/failover', async (req, res) => {
+app.post('/api/failover', asyncHandler(async (req, res) => {
   try {
     const { model } = req.body;
-    if (!model) return res.status(400).json({ ok: false, error: 'model is required' });
+    if (!model) return apiError(res, 400, 'VALIDATION_ERROR', 'model is required');
 
     // Use CLI to hot-swap — takes effect immediately without restart
     const out = await run(`openclaw models set "${model}"`, 10000);
@@ -1625,7 +1637,7 @@ app.post('/api/failover', async (req, res) => {
       output: out,
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
 
@@ -1644,9 +1656,9 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 15000) {
   }
 }
 
-app.get('/api/:connId/remote-test', async (req, res) => {
+app.get('/api/:connId/remote-test', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
-  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
     // For local, just confirm everything is reachable locally
@@ -1765,7 +1777,7 @@ app.get('/api/:connId/remote-test', async (req, res) => {
 
 // ── Gateway Discover (Bonjour/mDNS) ─────────────────────────────────────────
 
-app.get('/api/discover', async (req, res) => {
+app.get('/api/discover', asyncHandler(async (req, res) => {
   try {
     const raw = await run('openclaw gateway discover --json --timeout 4000', 10000);
     const parsed = tryJsonParse(raw);
@@ -1791,6 +1803,18 @@ for (const oldPath of ['/api/gateway/status', '/api/models/status', '/api/models
     res.redirect(307, `${newPath}${req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''}`);
   });
 }
+
+// ── Catch-all Error Middleware ────────────────────────────────────────────────
+
+app.use((err, req, res, _next) => {
+  console.error(`[unhandled] ${req.method} ${req.originalUrl}:`, err);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    ok: false,
+    error: err.message || 'Internal server error',
+    code: 'INTERNAL_ERROR',
+  });
+});
 
 // ── WebSocket for live status push ───────────────────────────────────────────
 

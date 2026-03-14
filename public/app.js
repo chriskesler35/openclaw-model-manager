@@ -6,6 +6,12 @@ let lastModelsData = null;
 let ws = null;
 let statsInterval = null;
 
+window.addEventListener('unhandledrejection', e => {
+  console.error('Unhandled promise rejection:', e.reason);
+  const msg = e.reason?.message || String(e.reason || 'Unknown error');
+  toast(`Unexpected error: ${msg}`, 'error');
+});
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   await loadConnections();
@@ -33,8 +39,24 @@ function byId(id) { return document.getElementById(id); }
 async function api(method, path, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(path, opts);
-  return res.json();
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (e) {
+    toast(`Network error: ${e.message}`, 'error');
+    return { ok: false, error: e.message, code: 'NETWORK_ERROR' };
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    toast(`Bad response from server (${res.status})`, 'error');
+    return { ok: false, error: 'Invalid JSON response', code: 'PARSE_ERROR' };
+  }
+  if (!res.ok) {
+    toast(data.error || `HTTP ${res.status}`, 'error');
+  }
+  return data;
 }
 
 function capi(method, path, body) {
