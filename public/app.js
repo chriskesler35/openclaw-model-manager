@@ -168,11 +168,17 @@ function capiRetry(path) {
 }
 
 function toast(msg, type = 'info') {
+  // Always log to console so errors are captured in F12
+  if (type === 'error') console.error('[toast]', msg);
+  else if (type === 'warning') console.warn('[toast]', msg);
+  else console.log('[toast]', msg);
+
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
   el.textContent = msg;
   byId('toast-container').appendChild(el);
-  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 4000);
+  const duration = type === 'error' ? 10000 : 5000;
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, duration);
 }
 
 function feedback(id, msg, type) {
