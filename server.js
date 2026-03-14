@@ -405,8 +405,18 @@ app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
 
   if (conn.type === 'local') {
     try {
-      const out = await run(`openclaw gateway ${action}`, 20000);
-      res.json({ ok: true, message: out || `Gateway ${action} requested` });
+      let out;
+      if (action === 'restart') {
+        // Windows scheduled task restart: stop, wait, then start
+        // openclaw gateway restart is unreliable (kills process but task has no auto-restart trigger)
+        try { await run('openclaw gateway stop', 15000); } catch {}
+        // Wait for process to fully exit
+        await new Promise(r => setTimeout(r, 3000));
+        out = await run('openclaw gateway start', 20000);
+      } else {
+        out = await run(`openclaw gateway ${action}`, 20000);
+      }
+      res.json({ ok: true, message: out || `Gateway ${action} completed` });
     } catch (e) {
       apiError(res, 500, 'GATEWAY_ERROR', e.message, { stdout: e.stdout });
     }

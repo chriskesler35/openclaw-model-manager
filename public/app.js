@@ -616,6 +616,31 @@ async function gatewayAction(action) {
     if (res.ok) {
       toast(`Gateway ${action} successful`, 'success');
       feedback('gateway-feedback', res.message || `${action} completed`, 'success');
+
+      // After restart/start, poll until gateway is back online
+      if (action === 'restart' || action === 'start') {
+        btn.innerHTML = `<span class="spinner"></span> waiting for gateway…`;
+        feedback('gateway-feedback', 'Waiting for gateway to come back online...', 'info');
+        let online = false;
+        for (let i = 0; i < 15; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const health = await api('GET', `/api/${activeConnId}/health`);
+            if (health.ok && isGatewayRunning(health.status)) {
+              online = true;
+              break;
+            }
+          } catch {}
+        }
+        if (online) {
+          toast('Gateway is back online', 'success');
+          feedback('gateway-feedback', 'Gateway is back online ✓', 'success');
+          refreshAll();
+        } else {
+          toast('Gateway may still be starting — check status in a moment', 'warning');
+          feedback('gateway-feedback', 'Gateway did not respond yet. It may still be starting.', 'warning');
+        }
+      }
     } else {
       toast(`Gateway ${action} failed: ${res.error}`, 'error');
       feedback('gateway-feedback', res.error + (res.hint ? ` — ${res.hint}` : ''), 'error');
