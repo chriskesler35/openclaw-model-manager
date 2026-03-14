@@ -620,7 +620,9 @@ async function gatewayAction(action) {
       // After restart/start, poll until gateway is back online
       if (action === 'restart' || action === 'start') {
         btn.innerHTML = `<span class="spinner"></span> waiting for gateway…`;
-        feedback('gateway-feedback', 'Waiting for gateway to come back online...', 'info');
+        feedback('gateway-feedback', action === 'restart'
+          ? '⏳ Restarting gateway — this can take up to 30 seconds while the process recycles...'
+          : 'Waiting for gateway to come back online...', 'info');
         let online = false;
         for (let i = 0; i < 15; i++) {
           await new Promise(r => setTimeout(r, 2000));
