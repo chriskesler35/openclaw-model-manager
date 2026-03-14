@@ -112,7 +112,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   refreshProviderStatus();
 
   byId('model-input').addEventListener('keydown', e => { if (e.key === 'Enter') setModel(); });
-  byId('fallback-input').addEventListener('keydown', e => { if (e.key === 'Enter') addFallback(); });
   byId('alias-model').addEventListener('keydown', e => { if (e.key === 'Enter') addAlias(); });
 });
 
