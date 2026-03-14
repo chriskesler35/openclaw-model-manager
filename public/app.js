@@ -2578,6 +2578,9 @@ async function refreshRouting() {
   if (profilesRes.ok) renderRoutingProfiles(profilesRes.profiles, profilesRes.activeProfileId);
   if (costsRes.ok) renderCostSummary(costsRes.today);
   if (historyRes.ok) renderCostChart(historyRes.days);
+
+  // Also refresh cache section
+  refreshCacheStats();
 }
 
 function renderCostSummary(today) {
@@ -2746,4 +2749,149 @@ async function deleteRoutingProfile(id) {
     toast('Profile deleted', 'success');
     refreshRouting();
   }
+}
+
+// ── Semantic Cache ──────────────────────────────────────────────────────────
+
+let _cacheCurrentPage = 1;
+
+async function refreshCacheStats() {
+  const [statsRes, configRes] = await Promise.all([
+    api('GET', '/api/cache/stats'),
+    api('GET', '/api/cache/config'),
+  ]);
+
+  if (statsRes.ok) {
+    byId('cache-total').textContent = statsRes.totalEntries;
+    byId('cache-hits').textContent = statsRes.totalHits;
+    byId('cache-hitrate').textContent = statsRes.hitRate + '%';
+    byId('cache-savings').textContent = '$' + (statsRes.estimatedSavings || 0).toFixed(2);
+  }
+
+  if (configRes.ok) {
+    const cfg = configRes.config;
+    byId('cache-enabled').checked = cfg.enabled !== false;
+    const slider = byId('cache-threshold');
+    slider.value = Math.round((cfg.threshold || 0.92) * 100);
+    updateThresholdDisplay();
+  }
+
+  loadCacheEntries(_cacheCurrentPage);
+}
+
+function updateThresholdDisplay() {
+  const val = byId('cache-threshold').value;
+  byId('cache-threshold-val').textContent = (val / 100).toFixed(2);
+}
+
+async function saveCacheConfig() {
+  const threshold = parseInt(byId('cache-threshold').value) / 100;
+  const enabled = byId('cache-enabled').checked;
+  const res = await api('PUT', '/api/cache/config', { enabled, threshold });
+  if (res.ok) toast('Cache config saved', 'success');
+}
+
+async function toggleCacheEnabled() {
+  const enabled = byId('cache-enabled').checked;
+  const res = await api('PUT', '/api/cache/config', { enabled });
+  if (res.ok) toast(enabled ? 'Cache enabled' : 'Cache disabled', 'success');
+}
+
+async function loadCacheEntries(page) {
+  _cacheCurrentPage = page || 1;
+  const res = await api('GET', `/api/cache/entries?page=${_cacheCurrentPage}&limit=20`);
+  if (!res.ok) return;
+
+  const wrap = byId('cache-entries-wrap');
+  const entries = res.entries || [];
+
+  if (entries.length === 0) {
+    wrap.innerHTML = '<div class="empty-state">No cache entries yet. Use "Add to Cache" or the test panel to seed entries.</div>';
+    byId('cache-pagination').innerHTML = '';
+    return;
+  }
+
+  const rows = entries.map(e => {
+    const age = e.createdAt ? timeSince(e.createdAt) : '—';
+    return `<tr>
+      <td title="${esc(e.promptPreview || '')}">${esc((e.promptPreview || '').slice(0, 50))}${(e.promptPreview || '').length > 50 ? '…' : ''}</td>
+      <td>${modelIcon(e.model || '')} ${esc(e.model || '—')}</td>
+      <td class="mono">${(e.tokens || 0).toLocaleString()}</td>
+      <td class="mono">${e.hits || 0}</td>
+      <td class="text-dim">${age}</td>
+      <td><button class="btn btn-sm btn-danger" onclick="deleteCacheEntry('${esc(e.id)}')">✕</button></td>
+    </tr>`;
+  }).join('');
+
+  wrap.innerHTML = `<table class="cost-table">
+    <thead><tr><th>Prompt</th><th>Model</th><th>Tokens</th><th>Hits</th><th>Age</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+
+  // Pagination
+  const pag = byId('cache-pagination');
+  if (res.totalPages > 1) {
+    pag.innerHTML = `
+      <button onclick="loadCacheEntries(${_cacheCurrentPage - 1})" ${_cacheCurrentPage <= 1 ? 'disabled' : ''}>← Prev</button>
+      <span>Page ${res.page} of ${res.totalPages}</span>
+      <button onclick="loadCacheEntries(${_cacheCurrentPage + 1})" ${_cacheCurrentPage >= res.totalPages ? 'disabled' : ''}>Next →</button>
+    `;
+  } else {
+    pag.innerHTML = '';
+  }
+}
+
+function timeSince(dateStr) {
+  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm ago';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + 'h ago';
+  const days = Math.floor(hours / 24);
+  return days + 'd ago';
+}
+
+async function deleteCacheEntry(id) {
+  const res = await api('DELETE', `/api/cache/entries/${encodeURIComponent(id)}`);
+  if (res.ok) {
+    toast('Cache entry deleted', 'success');
+    refreshCacheStats();
+  }
+}
+
+async function clearCache() {
+  if (!confirm('Clear all cache entries? This cannot be undone.')) return;
+  const res = await api('POST', '/api/cache/clear');
+  if (res.ok) {
+    toast(`Cache cleared (${res.entriesRemoved} entries removed)`, 'success');
+    refreshCacheStats();
+  }
+}
+
+async function testCachePrompt() {
+  const prompt = byId('cache-test-input').value.trim();
+  if (!prompt) { toast('Enter a prompt to test', 'warning'); return; }
+
+  const resultEl = byId('cache-test-result');
+  resultEl.textContent = 'Testing…';
+  resultEl.className = 'cache-test-result';
+
+  const res = await api('POST', '/api/cache/test', { prompt });
+  if (!res.ok) {
+    resultEl.textContent = res.error || 'Test failed';
+    resultEl.className = 'cache-test-result cache-test-miss';
+    return;
+  }
+
+  if (res.hit) {
+    resultEl.textContent = `HIT — similarity: ${res.similarity} | model: ${res.model || '?'} | tokens: ${res.tokens || 0}`;
+    resultEl.className = 'cache-test-result cache-test-hit';
+  } else {
+    resultEl.textContent = `MISS — best similarity: ${res.similarity}`;
+    resultEl.className = 'cache-test-result cache-test-miss';
+  }
+
+  // Refresh stats since test may have updated hit counts
+  refreshCacheStats();
 }

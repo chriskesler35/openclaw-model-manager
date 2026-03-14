@@ -1419,6 +1419,100 @@ table.model-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 .text-dim { color: var(--text-dim); }
 
+/* ── Semantic Cache ────────────────────────────────────────────────────────── */
+.cache-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.cache-controls-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.cache-threshold-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+}
+.cache-threshold-label {
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.cache-threshold-row input[type="range"] {
+  flex: 1;
+  max-width: 260px;
+  accent-color: var(--accent);
+}
+.cache-threshold-val {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  min-width: 36px;
+  text-align: center;
+}
+.cache-test-area {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  margin-bottom: 16px;
+}
+.cache-test-area textarea {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 10px;
+  font-size: 13px;
+  font-family: var(--font);
+  resize: vertical;
+}
+.cache-test-area textarea:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+.cache-test-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+.cache-test-result {
+  font-size: 13px;
+  font-family: var(--mono);
+}
+.cache-test-hit { color: var(--success); font-weight: 600; }
+.cache-test-miss { color: var(--text-dim); }
+.cache-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.cache-pagination button {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cache-pagination button:hover { background: var(--bg-hover); border-color: var(--accent); }
+.cache-pagination button:disabled { opacity: 0.4; cursor: default; }
+.cache-pagination span { font-size: 12px; color: var(--text-dim); }
+
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 @media (max-width: 860px) {
   header { flex-wrap: wrap; gap: 8px; padding: 12px 16px; }

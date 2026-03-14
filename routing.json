@@ -1,0 +1,62 @@
+{
+  "activeProfileId": null,
+  "profiles": [
+    {
+      "id": "cloud-first",
+      "name": "Cloud First",
+      "description": "Maximum capability — use the most powerful cloud model as primary",
+      "rules": [
+        {
+          "condition": "default",
+          "model": "anthropic/claude-opus-4-6"
+        }
+      ],
+      "primary": "anthropic/claude-opus-4-6",
+      "fallbacks": [
+        "google/gemini-2.5-pro",
+        "anthropic/claude-sonnet-4-6",
+        "openrouter/auto"
+      ]
+    },
+    {
+      "id": "local-first",
+      "name": "Local First",
+      "description": "Cost saving — route to local GPU models, fall back to cloud only when needed",
+      "rules": [
+        {
+          "condition": "cost-saving",
+          "model": "ollama/qwen2.5-coder:32b",
+          "description": "Route to local when possible"
+        }
+      ],
+      "primary": "ollama/qwen2.5-coder:32b",
+      "fallbacks": [
+        "ollama/qwen2.5-coder:14b",
+        "anthropic/claude-opus-4-6",
+        "openrouter/auto"
+      ]
+    },
+    {
+      "id": "balanced",
+      "name": "Balanced",
+      "description": "Best of both worlds — mid-tier cloud primary with local fallback",
+      "rules": [
+        {
+          "condition": "default",
+          "model": "anthropic/claude-sonnet-4-6"
+        },
+        {
+          "condition": "cost-saving",
+          "model": "ollama/qwen2.5-coder:32b",
+          "description": "Route to local when possible"
+        }
+      ],
+      "primary": "anthropic/claude-sonnet-4-6",
+      "fallbacks": [
+        "ollama/qwen2.5-coder:32b",
+        "anthropic/claude-opus-4-6",
+        "openrouter/auto"
+      ]
+    }
+  ]
+}

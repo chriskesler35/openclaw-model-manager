@@ -2262,6 +2262,300 @@ app.get('/api/routing/costs/history', asyncHandler(async (req, res) => {
   res.json({ ok: true, days });
 }));
 
+// ── Semantic Cache ──────────────────────────────────────────────────────────
+
+const CACHE_FILE = path.join(__dirname, 'prompt-cache.json');
+const CACHE_CONFIG_FILE = path.join(__dirname, 'cache-config.json');
+const OLLAMA_URL = 'http://127.0.0.1:11434';
+
+let _cacheData = null; // lazy loaded
+
+function loadCache() {
+  if (_cacheData) return _cacheData;
+  try {
+    if (fs.existsSync(CACHE_FILE)) {
+      _cacheData = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+      return _cacheData;
+    }
+  } catch {}
+  _cacheData = { entries: [] };
+  return _cacheData;
+}
+
+function saveCache(data) {
+  _cacheData = data;
+  fs.writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function loadCacheConfig() {
+  try {
+    if (fs.existsSync(CACHE_CONFIG_FILE)) return JSON.parse(fs.readFileSync(CACHE_CONFIG_FILE, 'utf8'));
+  } catch {}
+  return { enabled: true, threshold: 0.92, maxEntries: 500 };
+}
+
+function saveCacheConfig(cfg) {
+  fs.writeFileSync(CACHE_CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+}
+
+function cosineSimilarity(a, b) {
+  if (!a || !b || a.length !== b.length || a.length === 0) return 0;
+  let dot = 0, magA = 0, magB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(magA) * Math.sqrt(magB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+async function getEmbeddingModel() {
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/tags`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const models = (data.models || []).map(m => m.name || m.model);
+    // Prefer small embedding-friendly models
+    const preferred = ['llama3.1:8b', 'qwen2.5-coder:7b', 'llama3.2:3b', 'llama3:8b', 'qwen2.5:7b', 'nomic-embed-text'];
+    for (const p of preferred) {
+      if (models.some(m => m.startsWith(p))) return p;
+    }
+    // Fall back to first available model
+    return models[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getEmbedding(text) {
+  const model = await getEmbeddingModel();
+  if (!model) {
+    mmLog('warn', 'Cache: no Ollama model available for embeddings');
+    return null;
+  }
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, prompt: text }),
+    });
+    if (!res.ok) {
+      mmLog('warn', 'Cache: Ollama embedding request failed', { status: res.status });
+      return null;
+    }
+    const data = await res.json();
+    return data.embedding || null;
+  } catch (e) {
+    mmLog('warn', 'Cache: Ollama offline or error', { error: e.message });
+    return null;
+  }
+}
+
+async function cacheLookup(prompt, threshold) {
+  if (threshold == null) threshold = loadCacheConfig().threshold || 0.92;
+  const embedding = await getEmbedding(prompt);
+  if (!embedding) return { hit: false, similarity: 0 };
+
+  const cache = loadCache();
+  let bestMatch = null;
+  let bestSim = 0;
+
+  for (const entry of cache.entries) {
+    if (!entry.embedding) continue;
+    const sim = cosineSimilarity(embedding, entry.embedding);
+    if (sim > bestSim) {
+      bestSim = sim;
+      bestMatch = entry;
+    }
+  }
+
+  if (bestMatch && bestSim >= threshold) {
+    return { hit: true, similarity: bestSim, entry: bestMatch, embedding };
+  }
+  return { hit: false, similarity: bestSim, embedding };
+}
+
+function evictLRU(cache, maxEntries) {
+  if (cache.entries.length <= maxEntries) return;
+  // Sort by lastHit (oldest first), then by hits (fewest first)
+  cache.entries.sort((a, b) => {
+    const aTime = a.lastHit || a.createdAt || '';
+    const bTime = b.lastHit || b.createdAt || '';
+    return aTime.localeCompare(bTime);
+  });
+  cache.entries = cache.entries.slice(cache.entries.length - maxEntries);
+}
+
+function promptHash(text) {
+  // Simple hash for deduplication
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    hash = ((hash << 5) - hash) + ch;
+    hash |= 0;
+  }
+  return hash.toString(36);
+}
+
+// GET /api/cache/stats
+app.get('/api/cache/stats', asyncHandler(async (req, res) => {
+  const cache = loadCache();
+  const entries = cache.entries || [];
+  const totalHits = entries.reduce((sum, e) => sum + (e.hits || 0), 0);
+  const totalEntries = entries.length;
+
+  // Estimate savings: tokens that were cache-hit * average cloud cost per token
+  const avgCostPerToken = 15 / 1_000_000; // rough opus input pricing
+  const totalCachedTokens = entries.reduce((sum, e) => sum + ((e.tokens || 0) * (e.hits || 0)), 0);
+  const estimatedSavings = totalCachedTokens * avgCostPerToken;
+
+  // Hit rate: total hits / (total hits + total entries) as a proxy
+  const hitRate = totalEntries > 0 ? Math.round((totalHits / Math.max(totalHits + totalEntries, 1)) * 100) : 0;
+
+  const topEntries = [...entries]
+    .sort((a, b) => (b.hits || 0) - (a.hits || 0))
+    .slice(0, 10)
+    .map(e => ({
+      id: e.id,
+      promptPreview: e.promptPreview,
+      model: e.model,
+      tokens: e.tokens,
+      hits: e.hits || 0,
+      lastHit: e.lastHit,
+      createdAt: e.createdAt,
+    }));
+
+  res.json({ ok: true, totalEntries, totalHits, hitRate, estimatedSavings, topEntries });
+}));
+
+// GET /api/cache/entries
+app.get('/api/cache/entries', asyncHandler(async (req, res) => {
+  const cache = loadCache();
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+  const entries = (cache.entries || [])
+    .map(e => ({
+      id: e.id,
+      promptHash: e.promptHash,
+      promptPreview: e.promptPreview,
+      model: e.model,
+      tokens: e.tokens,
+      hits: e.hits || 0,
+      lastHit: e.lastHit,
+      createdAt: e.createdAt,
+      // omit embedding — too large
+    }))
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+  const total = entries.length;
+  const totalPages = Math.ceil(total / limit);
+  const start = (page - 1) * limit;
+  const paged = entries.slice(start, start + limit);
+
+  res.json({ ok: true, entries: paged, page, limit, total, totalPages });
+}));
+
+// DELETE /api/cache/entries/:id
+app.delete('/api/cache/entries/:id', asyncHandler(async (req, res) => {
+  const cache = loadCache();
+  const idx = cache.entries.findIndex(e => e.id === req.params.id);
+  if (idx === -1) return apiError(res, 404, 'NOT_FOUND', 'Cache entry not found');
+  cache.entries.splice(idx, 1);
+  saveCache(cache);
+  mmLog('info', 'Cache entry deleted', { id: req.params.id });
+  res.json({ ok: true });
+}));
+
+// POST /api/cache/clear
+app.post('/api/cache/clear', asyncHandler(async (req, res) => {
+  const cache = loadCache();
+  const count = cache.entries.length;
+  cache.entries = [];
+  saveCache(cache);
+  mmLog('info', 'Cache cleared', { entriesRemoved: count });
+  res.json({ ok: true, entriesRemoved: count });
+}));
+
+// GET /api/cache/config
+app.get('/api/cache/config', asyncHandler(async (req, res) => {
+  res.json({ ok: true, config: loadCacheConfig() });
+}));
+
+// PUT /api/cache/config
+app.put('/api/cache/config', asyncHandler(async (req, res) => {
+  const current = loadCacheConfig();
+  const { enabled, threshold, maxEntries } = req.body;
+  if (typeof enabled === 'boolean') current.enabled = enabled;
+  if (typeof threshold === 'number' && threshold >= 0.5 && threshold <= 1.0) current.threshold = threshold;
+  if (typeof maxEntries === 'number' && maxEntries >= 10 && maxEntries <= 10000) current.maxEntries = maxEntries;
+  saveCacheConfig(current);
+  mmLog('info', 'Cache config updated', current);
+  res.json({ ok: true, config: current });
+}));
+
+// POST /api/cache/test
+app.post('/api/cache/test', asyncHandler(async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt || typeof prompt !== 'string') return apiError(res, 400, 'BAD_REQUEST', 'prompt is required');
+
+  const config = loadCacheConfig();
+  const result = await cacheLookup(prompt, config.threshold);
+
+  if (result.hit) {
+    // Update hit counter
+    result.entry.hits = (result.entry.hits || 0) + 1;
+    result.entry.lastHit = new Date().toISOString();
+    saveCache(loadCache());
+
+    res.json({
+      ok: true,
+      hit: true,
+      similarity: Math.round(result.similarity * 10000) / 10000,
+      cachedResponse: result.entry.response,
+      model: result.entry.model,
+      promptPreview: result.entry.promptPreview,
+      tokens: result.entry.tokens,
+    });
+  } else {
+    res.json({
+      ok: true,
+      hit: false,
+      similarity: Math.round(result.similarity * 10000) / 10000,
+    });
+  }
+}));
+
+// POST /api/cache/add — manually seed a prompt+response pair
+app.post('/api/cache/add', asyncHandler(async (req, res) => {
+  const { prompt, response, model, tokens } = req.body;
+  if (!prompt || !response) return apiError(res, 400, 'BAD_REQUEST', 'prompt and response are required');
+
+  const config = loadCacheConfig();
+  const embedding = await getEmbedding(prompt);
+  if (!embedding) return apiError(res, 503, 'EMBEDDING_FAILED', 'Could not generate embedding — is Ollama running?');
+
+  const cache = loadCache();
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  cache.entries.push({
+    id,
+    promptHash: promptHash(prompt),
+    promptPreview: prompt.slice(0, 100),
+    embedding,
+    response,
+    model: model || 'unknown',
+    tokens: tokens || 0,
+    createdAt: new Date().toISOString(),
+    hits: 0,
+    lastHit: null,
+  });
+
+  evictLRU(cache, config.maxEntries);
+  saveCache(cache);
+  mmLog('info', 'Cache entry added', { id, model, promptPreview: prompt.slice(0, 60) });
+  res.json({ ok: true, id });
+}));
+
 // ── Backward-compat: old routes without connId → use default ─────────────────
 
 function getDefaultConnId() {

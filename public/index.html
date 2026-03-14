@@ -37,9 +37,6 @@
       <button class="tab" data-tab="routing" onclick="switchTab('routing')">
         <span class="tab-icon">🔀</span> Routing
       </button>
-      <button class="tab" data-tab="logs" onclick="switchTab('logs')">
-        <span class="tab-icon">📋</span> Logs
-      </button>
       <button class="tab" data-tab="gateway" onclick="switchTab('gateway')">
         <span class="tab-icon">🔌</span> Gateway
       </button>
@@ -60,6 +57,9 @@
       </button>
       <button class="tab" data-tab="connections" onclick="switchTab('connections')">
         <span class="tab-icon">🌐</span> Connections
+      </button>
+      <button class="tab" data-tab="logs" onclick="switchTab('logs')">
+        <span class="tab-icon">📋</span> Logs
       </button>
     </nav>
 
@@ -135,6 +135,68 @@
             <h3>Per-Model Breakdown</h3>
             <div id="cost-breakdown" class="model-table-wrap">
               <div class="empty-state">Loading…</div>
+            </div>
+          </div>
+
+          <!-- Semantic Cache -->
+          <div class="sub-section" style="margin-top:32px">
+            <div class="cache-section-header">
+              <h3>Semantic Cache</h3>
+              <div class="cache-controls-inline">
+                <label class="toggle-label">
+                  <input type="checkbox" id="cache-enabled" onchange="toggleCacheEnabled()">
+                  Enabled
+                </label>
+                <button class="btn btn-sm" onclick="refreshCacheStats()">↻ Refresh</button>
+              </div>
+            </div>
+
+            <!-- Cache Stats Cards -->
+            <div class="stats-grid" id="cache-stats" style="margin:16px 0">
+              <div class="stat-card">
+                <span class="stat-label">Cached Entries</span>
+                <span id="cache-total" class="stat-value">0</span>
+              </div>
+              <div class="stat-card">
+                <span class="stat-label">Cache Hits</span>
+                <span id="cache-hits" class="stat-value">0</span>
+              </div>
+              <div class="stat-card">
+                <span class="stat-label">Hit Rate</span>
+                <span id="cache-hitrate" class="stat-value">0%</span>
+              </div>
+              <div class="stat-card">
+                <span class="stat-label">Est. Savings</span>
+                <span id="cache-savings" class="stat-value" style="color:var(--success)">$0.00</span>
+              </div>
+            </div>
+
+            <!-- Threshold Slider -->
+            <div class="cache-threshold-row">
+              <label class="cache-threshold-label">Similarity Threshold</label>
+              <input type="range" id="cache-threshold" min="80" max="99" value="92" step="1" oninput="updateThresholdDisplay()">
+              <span id="cache-threshold-val" class="cache-threshold-val">0.92</span>
+              <button class="btn btn-sm" onclick="saveCacheConfig()">Save</button>
+            </div>
+
+            <!-- Cache Test -->
+            <div class="cache-test-area">
+              <textarea id="cache-test-input" placeholder="Paste a prompt here to test if it would hit the cache…" rows="3"></textarea>
+              <div class="cache-test-actions">
+                <button class="btn btn-primary btn-sm" onclick="testCachePrompt()">Test Cache</button>
+                <span id="cache-test-result" class="cache-test-result"></span>
+              </div>
+            </div>
+
+            <!-- Cache Entries Table -->
+            <div id="cache-entries-wrap" class="model-table-wrap" style="margin-top:16px">
+              <div class="empty-state">No cache entries yet.</div>
+            </div>
+            <div id="cache-pagination" class="cache-pagination"></div>
+
+            <!-- Clear Cache -->
+            <div style="margin-top:12px; display:flex; gap:8px; align-items:center">
+              <button class="btn btn-sm btn-danger" onclick="clearCache()">Clear All Cache</button>
             </div>
           </div>
 
