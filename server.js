@@ -467,7 +467,7 @@ app.get('/api/:connId/models/list', asyncHandler(async (req, res) => {
   if (conn.type === 'local') {
     try {
       const flag = req.query.all === 'true' ? ' --all' : '';
-      const raw = await run(`openclaw models list --json${flag}`);
+      const raw = await run(`openclaw models list --json${flag}`, 45000);
       res.json({ ok: true, data: tryJsonParse(raw) || raw });
     } catch (e) {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
@@ -673,7 +673,7 @@ app.get('/api/:connId/models/available', asyncHandler(async (req, res) => {
 
   try {
     if (conn.type === 'local') {
-      const raw = await run('openclaw models list --json', 15000);
+      const raw = await run('openclaw models list --json', 45000);
       const parsed = tryJsonParse(raw);
       const models = (parsed?.models || []).map(m => ({
         key: m.key,
