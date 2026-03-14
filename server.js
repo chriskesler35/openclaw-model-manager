@@ -70,6 +70,30 @@ function tryJsonParse(str) {
   try { return JSON.parse(str); } catch { return null; }
 }
 
+// ── Input Validation ─────────────────────────────────────────────────────────
+
+const validate = {
+  isNonEmptyString: s => typeof s === 'string' && s.trim().length > 0,
+  isValidHostname: s => typeof s === 'string' && /^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$/.test(s) && s.length <= 253,
+  isValidPort: n => Number.isInteger(n) && n >= 1 && n <= 65535,
+  isValidModelId: s => typeof s === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9\-_\.:\/@]*$/.test(s) && s.length <= 256,
+  isValidAlias: s => typeof s === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9\-]*$/.test(s) && s.length <= 64,
+  isValidApiKey: s => typeof s === 'string' && s.trim().length >= 8,
+};
+
+// Sanitize a string for safe inclusion in PowerShell shell commands.
+// Rejects characters that could enable command injection via PS operators.
+function sanitizeShellArg(s) {
+  if (typeof s !== 'string') return '';
+  // Reject strings with dangerous PowerShell metacharacters
+  if (/[`$;|&<>{}()\[\]!\r\n]/.test(s)) {
+    throw new Error('Input contains forbidden characters');
+  }
+  // Strip surrounding quotes user may have included, then wrap in single-quotes
+  // (PowerShell single-quoted strings treat everything literally except '')
+  return s.replace(/'/g, "''");
+}
+
 // Track consecutive RPC failures per connection
 const rpcFailures = new Map();
 
@@ -218,9 +242,9 @@ async function httpHealthCheck(conn) {
 function remoteFlags(conn) {
   let flags = '';
   if (conn.type !== 'local') {
-    flags += ` --url ws://${conn.host}:${conn.port}`;
-    if (conn.token) flags += ` --token "${conn.token}"`;
-    if (conn.password) flags += ` --password "${conn.password}"`;
+    flags += ` --url 'ws://${sanitizeShellArg(conn.host)}:${conn.port}'`;
+    if (conn.token) flags += ` --token '${sanitizeShellArg(conn.token)}'`;
+    if (conn.password) flags += ` --password '${sanitizeShellArg(conn.password)}'`;
   }
   return flags;
 }
@@ -240,7 +264,9 @@ app.get('/api/connections', asyncHandler(async (req, res) => {
 
 app.post('/api/connections', asyncHandler(async (req, res) => {
   const { name, host, port, token, password, tls, mmPort, ollamaPort, timeoutMs } = req.body;
-  if (!name || !host) return apiError(res, 400, 'VALIDATION_ERROR', 'name and host required');
+  if (!validate.isNonEmptyString(name)) return apiError(res, 400, 'VALIDATION_ERROR', 'name is required and must be a non-empty string');
+  if (!validate.isValidHostname(host)) return apiError(res, 400, 'VALIDATION_ERROR', 'host must be a valid hostname (alphanumeric, hyphens, dots, max 253 chars)');
+  if (port !== undefined && !validate.isValidPort(port)) return apiError(res, 400, 'VALIDATION_ERROR', 'port must be an integer between 1 and 65535');
 
   const data = loadConnections();
   const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/,'');
@@ -272,6 +298,9 @@ app.put('/api/connections/:id', asyncHandler(async (req, res) => {
   if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Not found');
 
   const { name, host, port, token, password, tls, mmPort, ollamaPort, timeoutMs } = req.body;
+  if (name !== undefined && !validate.isNonEmptyString(name)) return apiError(res, 400, 'VALIDATION_ERROR', 'name must be a non-empty string');
+  if (host !== undefined && !validate.isValidHostname(host)) return apiError(res, 400, 'VALIDATION_ERROR', 'host must be a valid hostname');
+  if (port !== undefined && !validate.isValidPort(port)) return apiError(res, 400, 'VALIDATION_ERROR', 'port must be an integer between 1 and 65535');
   if (name) conn.name = name;
   if (host) conn.host = host;
   if (port) conn.port = port;
@@ -333,7 +362,7 @@ app.get('/api/connections/:id/health', asyncHandler(async (req, res) => {
       res.json({ ok: true, status: { running: false, proxy: false, proxyError: proxyErr.message, httpError: httpRes.error }, rpcConsecutiveFailures: consecutiveFailures });
     }
   }
-});
+}));
 
 // ── Gateway Control (connection-aware) ───────────────────────────────────────
 
@@ -363,7 +392,7 @@ app.get('/api/:connId/gateway/status', asyncHandler(async (req, res) => {
       }
     }
   }
-});
+}));
 
 app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
@@ -406,7 +435,7 @@ app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
       }
     }
   }
-});
+}));
 
 // ── Models (connection-aware) ────────────────────────────────────────────────
 
@@ -429,7 +458,7 @@ app.get('/api/:connId/models/status', asyncHandler(async (req, res) => {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
-});
+}));
 
 app.get('/api/:connId/models/list', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
@@ -452,17 +481,17 @@ app.get('/api/:connId/models/list', asyncHandler(async (req, res) => {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
-});
+}));
 
 app.post('/api/:connId/models/set', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
   if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
   const { model } = req.body;
-  if (!model) return apiError(res, 400, 'VALIDATION_ERROR', 'model is required');
+  if (!validate.isValidModelId(model)) return apiError(res, 400, 'VALIDATION_ERROR', 'model must be a valid model ID');
 
   if (conn.type === 'local') {
     try {
-      const out = await run(`openclaw models set "${model}"`);
+      const out = await run(`openclaw models set '${sanitizeShellArg(model)}'`);
       res.json({ ok: true, message: out || `Model set to ${model}` });
     } catch (e) {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
@@ -475,7 +504,7 @@ app.post('/api/:connId/models/set', asyncHandler(async (req, res) => {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
-});
+}));
 
 // ── Aliases (connection-aware, local only for now) ───────────────────────────
 
@@ -494,17 +523,18 @@ app.get('/api/:connId/models/aliases', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 app.post('/api/:connId/models/aliases', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
   if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
   const { alias, model } = req.body;
-  if (!alias || !model) return apiError(res, 400, 'VALIDATION_ERROR', 'alias and model required');
+  if (!validate.isValidAlias(alias)) return apiError(res, 400, 'VALIDATION_ERROR', 'alias must be alphanumeric with hyphens (max 64 chars)');
+  if (!validate.isValidModelId(model)) return apiError(res, 400, 'VALIDATION_ERROR', 'model must be a valid model ID');
 
   if (conn.type === 'local') {
     try {
-      const out = await run(`openclaw models aliases add "${alias}" "${model}"`);
+      const out = await run(`openclaw models aliases add '${sanitizeShellArg(alias)}' '${sanitizeShellArg(model)}'`);
       res.json({ ok: true, message: out || `Alias ${alias} → ${model}` });
     } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   } else {
@@ -513,7 +543,7 @@ app.post('/api/:connId/models/aliases', asyncHandler(async (req, res) => {
       res.json(result);
     } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
-});
+}));
 
 app.delete('/api/:connId/models/aliases/:alias', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
@@ -521,7 +551,7 @@ app.delete('/api/:connId/models/aliases/:alias', asyncHandler(async (req, res) =
 
   if (conn.type === 'local') {
     try {
-      const out = await run(`openclaw models aliases remove "${req.params.alias}"`);
+      const out = await run(`openclaw models aliases remove '${sanitizeShellArg(req.params.alias)}'`);
       res.json({ ok: true, message: out || 'Alias removed' });
     } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   } else {
@@ -530,7 +560,7 @@ app.delete('/api/:connId/models/aliases/:alias', asyncHandler(async (req, res) =
       res.json(result);
     } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
-});
+}));
 
 // ── Fallbacks (connection-aware, local only for now) ─────────────────────────
 
@@ -549,17 +579,17 @@ app.get('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 app.post('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
   if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
   const { model } = req.body;
-  if (!model) return apiError(res, 400, 'VALIDATION_ERROR', 'model is required');
+  if (!validate.isValidModelId(model)) return apiError(res, 400, 'VALIDATION_ERROR', 'model must be a valid model ID');
 
   if (conn.type === 'local') {
     try {
-      const out = await run(`openclaw models fallbacks add "${model}"`);
+      const out = await run(`openclaw models fallbacks add '${sanitizeShellArg(model)}'`);
       res.json({ ok: true, message: out || `Fallback added: ${model}` });
     } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   } else {
@@ -568,7 +598,7 @@ app.post('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
       res.json(result);
     } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
-});
+}));
 
 app.delete('/api/:connId/models/fallbacks/:model', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
@@ -576,7 +606,7 @@ app.delete('/api/:connId/models/fallbacks/:model', asyncHandler(async (req, res)
 
   if (conn.type === 'local') {
     try {
-      const out = await run(`openclaw models fallbacks remove "${req.params.model}"`);
+      const out = await run(`openclaw models fallbacks remove '${sanitizeShellArg(req.params.model)}'`);
       res.json({ ok: true, message: out || 'Fallback removed' });
     } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   } else {
@@ -585,7 +615,7 @@ app.delete('/api/:connId/models/fallbacks/:model', asyncHandler(async (req, res)
       res.json(result);
     } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
-});
+}));
 
 app.delete('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
@@ -602,7 +632,7 @@ app.delete('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
       res.json(result);
     } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
   }
-});
+}));
 
 // Save entire fallback list (reorder/bulk edit)
 app.put('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
@@ -612,6 +642,7 @@ app.put('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
 
   const { fallbacks } = req.body;
   if (!Array.isArray(fallbacks)) return apiError(res, 400, 'VALIDATION_ERROR', 'fallbacks must be an array');
+  if (fallbacks.some(f => !validate.isValidModelId(f))) return apiError(res, 400, 'VALIDATION_ERROR', 'each fallback must be a valid model ID');
 
   try {
     const config = readJsonFile(OPENCLAW_CONFIG);
@@ -633,7 +664,7 @@ app.put('/api/:connId/models/fallbacks', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // Get all available models (for fallback dropdown)
 app.get('/api/:connId/models/available', asyncHandler(async (req, res) => {
@@ -658,7 +689,7 @@ app.get('/api/:connId/models/available', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // ── Auth Profiles ────────────────────────────────────────────────────────────
 
@@ -705,7 +736,7 @@ app.get('/api/:connId/auth/profiles', asyncHandler(async (req, res) => {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
   }
-});
+}));
 
 // ── Probe ────────────────────────────────────────────────────────────────────
 
@@ -723,7 +754,7 @@ app.post('/api/:connId/models/probe', asyncHandler(async (req, res) => {
   } else {
     apiError(res, 501, 'NOT_IMPLEMENTED', 'Probe not yet supported remotely');
   }
-});
+}));
 
 // ── Live System Stats (fast, for polling) ────────────────────────────────────
 
@@ -803,7 +834,7 @@ app.get('/api/system/stats', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // Connection-scoped stats
 app.get('/api/:connId/system/stats', asyncHandler(async (req, res) => {
@@ -831,7 +862,7 @@ app.get('/api/:connId/system/stats', asyncHandler(async (req, res) => {
   } catch {}
 
   res.json({ ok: true, data: { gpus: [], ram: null }, source: 'unavailable' });
-});
+}));
 
 // ── System Info & Local Models ────────────────────────────────────────────────
 
@@ -876,7 +907,7 @@ app.get('/api/system/info', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 app.get('/api/system/local-models', asyncHandler(async (req, res) => {
   try {
@@ -1041,7 +1072,7 @@ app.get('/api/system/local-models', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // ── Remote System Info & Local Models ─────────────────────────────────────────
 
@@ -1082,7 +1113,7 @@ app.get('/api/:connId/system/info', asyncHandler(async (req, res) => {
   // No remote Model Manager — return what we can
   res.json({ ok: true, data: null, source: 'unavailable',
     hint: `Could not reach Model Manager on ${conn.host}:${mmPort}. Install and run the Model Manager on the remote system for full system info.` });
-});
+}));
 
 app.get('/api/:connId/system/local-models', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
@@ -1170,7 +1201,7 @@ app.get('/api/:connId/system/local-models', asyncHandler(async (req, res) => {
     data: { models: [], system: {} },
     hint: `Could not reach Ollama (${conn.host}:${ollamaPort}) or Model Manager (${conn.host}:${mmPort}) on the remote host.`,
   });
-});
+}));
 
 // ── Model & Provider Management ─────────────────────────────────────────────
 
@@ -1251,7 +1282,7 @@ app.get('/api/credentials/status', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 function maskKey(key) {
   if (!key || key.length < 8) return '••••••••';
@@ -1262,8 +1293,11 @@ function maskKey(key) {
 app.post('/api/credentials/save', asyncHandler(async (req, res) => {
   try {
     const { provider, key, profileId: customProfileId } = req.body;
-    if (!provider || !key) {
-      return apiError(res, 400, 'VALIDATION_ERROR', 'Provider and key are required');
+    if (!validate.isNonEmptyString(provider)) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'provider is required and must be a non-empty string');
+    }
+    if (!validate.isValidApiKey(key)) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'API key must be a string of at least 8 characters');
     }
 
     const provInfo = KNOWN_PROVIDERS[provider];
@@ -1275,8 +1309,8 @@ app.post('/api/credentials/save', asyncHandler(async (req, res) => {
     }
 
     // Use CLI paste-token for safety (handles config updates properly)
-    const profileArg = customProfileId ? `--profile-id "${customProfileId}"` : '';
-    const cmd = `echo "${key.replace(/"/g, '')}" | openclaw models auth paste-token --provider ${provider} ${profileArg}`;
+    const profileArg = customProfileId ? `--profile-id '${sanitizeShellArg(customProfileId)}'` : '';
+    const cmd = `echo '${sanitizeShellArg(key)}' | openclaw models auth paste-token --provider '${sanitizeShellArg(provider)}' ${profileArg}`;
     
     try {
       await run(cmd, 15000);
@@ -1312,14 +1346,17 @@ app.post('/api/credentials/save', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // POST add a new model to the configuration
 app.post('/api/models/add', asyncHandler(async (req, res) => {
   try {
     const { provider, modelId, displayName, contextWindow, alias } = req.body;
-    if (!provider || !modelId) {
-      return apiError(res, 400, 'VALIDATION_ERROR', 'Provider and model ID are required');
+    if (!validate.isNonEmptyString(provider)) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'provider is required');
+    }
+    if (!validate.isValidModelId(modelId)) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'modelId must be alphanumeric with hyphens, underscores, dots, colons, slashes, or @ (max 256 chars)');
     }
 
     const fullModelKey = `${provider}/${modelId}`;
@@ -1390,7 +1427,7 @@ app.post('/api/models/add', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // DELETE remove a model from configuration
 app.delete('/api/models/remove', asyncHandler(async (req, res) => {
@@ -1432,7 +1469,7 @@ app.delete('/api/models/remove', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // GET gateway running sessions (to warn before restart)
 app.get('/api/gateway/sessions', asyncHandler(async (req, res) => {
@@ -1443,7 +1480,7 @@ app.get('/api/gateway/sessions', asyncHandler(async (req, res) => {
   } catch (e) {
     res.json({ ok: true, data: { sessions: [], error: e.message } });
   }
-});
+}));
 
 // ── Failover & Cooldown Management ──────────────────────────────────────────
 
@@ -1501,7 +1538,7 @@ app.get('/api/:connId/providers/status', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // Legacy non-connection-aware route
 app.get('/api/providers/status', (req, res) => {
@@ -1581,7 +1618,7 @@ app.post('/api/:connId/providers/clear-cooldown', asyncHandler(async (req, res) 
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // Legacy non-connection-aware route
 app.post('/api/providers/clear-cooldown', (req, res) => {
@@ -1624,9 +1661,9 @@ app.post('/api/:connId/failover', asyncHandler(async (req, res) => {
   // Local — fall through
   try {
     const { model } = req.body;
-    if (!model) return apiError(res, 400, 'VALIDATION_ERROR', 'model is required');
+    if (!validate.isValidModelId(model)) return apiError(res, 400, 'VALIDATION_ERROR', 'model must be a valid model ID');
 
-    const out = await run(`openclaw models set "${model}"`, 10000);
+    const out = await run(`openclaw models set '${sanitizeShellArg(model)}'`, 10000);
     res.json({
       ok: true,
       message: `Primary model switched to ${model}`,
@@ -1636,16 +1673,16 @@ app.post('/api/:connId/failover', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // Legacy non-connection-aware route
 app.post('/api/failover', asyncHandler(async (req, res) => {
   try {
     const { model } = req.body;
-    if (!model) return apiError(res, 400, 'VALIDATION_ERROR', 'model is required');
+    if (!validate.isValidModelId(model)) return apiError(res, 400, 'VALIDATION_ERROR', 'model must be a valid model ID');
 
     // Use CLI to hot-swap — takes effect immediately without restart
-    const out = await run(`openclaw models set "${model}"`, 10000);
+    const out = await run(`openclaw models set '${sanitizeShellArg(model)}'`, 10000);
     res.json({
       ok: true,
       message: `Primary model switched to ${model}`,
@@ -1655,7 +1692,7 @@ app.post('/api/failover', asyncHandler(async (req, res) => {
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
-});
+}));
 
 // ── Remote Connectivity Test ─────────────────────────────────────────────────
 
@@ -1789,7 +1826,7 @@ app.get('/api/:connId/remote-test', asyncHandler(async (req, res) => {
   };
 
   res.json({ ok: true, data: results, timeMs: Date.now() - start });
-});
+}));
 
 // ── Gateway Discover (Bonjour/mDNS) ─────────────────────────────────────────
 
@@ -1801,7 +1838,7 @@ app.get('/api/discover', asyncHandler(async (req, res) => {
   } catch (e) {
     res.json({ ok: true, data: { beacons: [], error: e.message } });
   }
-});
+}));
 
 // ── Backward-compat: old routes without connId → use default ─────────────────
 
