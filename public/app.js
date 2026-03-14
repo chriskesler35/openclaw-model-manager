@@ -245,6 +245,7 @@ function switchTab(tabId) {
 
   // Lazy-load data for tabs
   if (tabId === 'health') { refreshHealth(); refreshProviderStatus(); }
+  if (tabId === 'logs') refreshLogFiles();
   if (tabId === 'fallbacks') refreshFallbacks();
   if (tabId === 'local') refreshLocalModels();
   if (tabId === 'connections') renderConnList();
@@ -2436,4 +2437,118 @@ function autoAddDiscovered(name, host, port) {
   byId('conn-port').value = port;
   byId('conn-name').scrollIntoView({ behavior: 'smooth' });
   toast('Prefilled — add a token if needed, then click Add Connection', 'info');
+}
+
+// ── Logs Tab ──────────────────────────────────────────────────────────────────
+
+let logAutoRefreshInterval = null;
+
+async function refreshLogFiles() {
+  const select = byId('log-file-select');
+  const prev = select.value;
+  const res = await api('GET', '/api/logs/list');
+  if (!res.ok) return;
+
+  select.innerHTML = '<option value="">Select log file…</option>' +
+    (res.files || []).map(f => {
+      const sizeStr = f.size < 1024 ? `${f.size} B` : f.size < 1024 * 1024 ? `${(f.size / 1024).toFixed(1)} KB` : `${(f.size / (1024 * 1024)).toFixed(1)} MB`;
+      return `<option value="${esc(f.name)}">${esc(f.name)} (${sizeStr})</option>`;
+    }).join('');
+
+  // Re-select previous or auto-select model-manager.log
+  if (prev && res.files.some(f => f.name === prev)) {
+    select.value = prev;
+  } else if (res.files.some(f => f.name === 'model-manager.log')) {
+    select.value = 'model-manager.log';
+  }
+
+  if (select.value) loadLogFile();
+}
+
+async function loadLogFile() {
+  const name = byId('log-file-select').value;
+  const viewer = byId('log-viewer');
+  const status = byId('log-status');
+  if (!name) {
+    viewer.innerHTML = '<div class="empty-state">Select a log file to view its contents.</div>';
+    status.textContent = '';
+    return;
+  }
+
+  const res = await api('GET', `/api/logs/${encodeURIComponent(name)}?lines=200`);
+  if (!res.ok) {
+    viewer.innerHTML = `<div class="empty-state">Error loading log: ${esc(res.error || 'unknown')}</div>`;
+    return;
+  }
+
+  renderLogLines(res.lines || [], name);
+  status.textContent = `Showing ${res.lines?.length || 0} of ${res.total || 0} lines — ${new Date().toLocaleTimeString()}`;
+}
+
+function renderLogLines(lines, name) {
+  const viewer = byId('log-viewer');
+  if (!lines.length) {
+    viewer.innerHTML = '<div class="empty-state">Log file is empty.</div>';
+    return;
+  }
+
+  const isJsonl = name.endsWith('.jsonl') || name.endsWith('.log');
+  const html = lines.map(line => {
+    // Try to parse as JSONL
+    let parsed = null;
+    if (isJsonl) {
+      try { parsed = JSON.parse(line); } catch {}
+    }
+
+    if (parsed && parsed.ts && parsed.level) {
+      const levelClass = parsed.level === 'error' ? 'log-line-error' : parsed.level === 'warn' ? 'log-line-warn' : 'log-line-info';
+      const ts = parsed.ts.replace('T', ' ').replace(/\.\d+Z$/, '');
+      let msg = esc(parsed.message || '');
+      if (parsed.details) {
+        msg += ' <span style="color:var(--text-dim)">' + esc(typeof parsed.details === 'string' ? parsed.details : JSON.stringify(parsed.details)) + '</span>';
+      }
+      return `<div class="log-line ${levelClass}"><span class="log-line-ts">${esc(ts)}</span><span class="log-line-level">${esc(parsed.level)}</span><span class="log-line-msg">${msg}</span></div>`;
+    }
+
+    // Plain text fallback — highlight errors/warnings
+    const lower = line.toLowerCase();
+    const cls = lower.includes('error') || lower.includes('fail') ? 'log-line-error' :
+                lower.includes('warn') ? 'log-line-warn' : 'log-line-info';
+    return `<div class="log-line ${cls}">${esc(line)}</div>`;
+  }).join('');
+
+  viewer.innerHTML = html;
+  // Auto-scroll to bottom
+  viewer.scrollTop = viewer.scrollHeight;
+}
+
+function toggleLogAutoRefresh() {
+  const on = byId('log-auto-refresh').checked;
+  if (logAutoRefreshInterval) {
+    clearInterval(logAutoRefreshInterval);
+    logAutoRefreshInterval = null;
+  }
+  if (on) {
+    logAutoRefreshInterval = setInterval(() => {
+      if (byId('log-file-select').value) loadLogFile();
+    }, 5000);
+  }
+}
+
+function downloadLogFile() {
+  const name = byId('log-file-select').value;
+  if (!name) { toast('Select a log file first', 'warning'); return; }
+  window.open(`/api/logs/${encodeURIComponent(name)}/download`, '_blank');
+}
+
+async function clearLogFile() {
+  const name = byId('log-file-select').value;
+  if (!name) { toast('Select a log file first', 'warning'); return; }
+  if (!confirm(`Rotate ${name}? Current content will be saved as ${name}.1`)) return;
+
+  const res = await api('POST', `/api/logs/${encodeURIComponent(name)}/clear`);
+  if (res.ok) {
+    toast(res.message || 'Log rotated', 'success');
+    refreshLogFiles();
+  }
 }

@@ -34,6 +34,9 @@
       <button class="tab active" data-tab="health" onclick="switchTab('health')">
         <span class="tab-icon">💊</span> Health
       </button>
+      <button class="tab" data-tab="logs" onclick="switchTab('logs')">
+        <span class="tab-icon">📋</span> Logs
+      </button>
       <button class="tab" data-tab="gateway" onclick="switchTab('gateway')">
         <span class="tab-icon">🔌</span> Gateway
       </button>
@@ -78,6 +81,31 @@
         <!-- Health Cards -->
         <div id="health-report" class="health-report" style="margin-top:20px">
           <div class="empty-state">Loading health report…</div>
+        </div>
+      </section>
+
+      <!-- LOGS TAB -->
+      <section class="tab-panel" id="panel-logs">
+        <div class="panel-header">
+          <h2>Logs</h2>
+          <div class="header-controls">
+            <select id="log-file-select" onchange="loadLogFile()">
+              <option value="">Select log file…</option>
+            </select>
+            <label class="toggle-label">
+              <input type="checkbox" id="log-auto-refresh" onchange="toggleLogAutoRefresh()">
+              Auto-refresh
+            </label>
+            <button class="btn btn-sm" onclick="loadLogFile()">↻ Refresh</button>
+            <button class="btn btn-sm" onclick="downloadLogFile()">⬇ Download</button>
+            <button class="btn btn-sm btn-warning" onclick="clearLogFile()">🗑 Rotate</button>
+          </div>
+        </div>
+        <div class="panel-content">
+          <div id="log-viewer" class="log-viewer">
+            <div class="empty-state">Select a log file to view its contents.</div>
+          </div>
+          <div id="log-status" class="log-status"></div>
         </div>
       </section>
 

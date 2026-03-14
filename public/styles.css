@@ -1211,6 +1211,41 @@ table.model-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   vertical-align: middle;
 }
 
+/* ── Log Viewer ──────────────────────────────────────────────────────────── */
+.log-viewer {
+  background: #0a0c12;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 600px;
+  overflow-y: auto;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-viewer .empty-state { font-family: var(--font); }
+.log-line { padding: 1px 0; }
+.log-line-error { color: var(--danger); }
+.log-line-warn { color: var(--warning); }
+.log-line-info { color: var(--text-dim); }
+.log-line-ts { color: var(--text-label); margin-right: 8px; }
+.log-line-level { font-weight: 600; margin-right: 8px; text-transform: uppercase; min-width: 48px; display: inline-block; }
+.log-line-msg { color: var(--text); }
+.log-status { font-size: 11px; color: var(--text-dim); margin-top: 8px; }
+
+#log-file-select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--font);
+}
+
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 @media (max-width: 860px) {
   header { flex-wrap: wrap; gap: 8px; padding: 12px 16px; }

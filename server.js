@@ -9,6 +9,38 @@ const app = express();
 const PORT = process.env.MM_PORT || 18800;
 const CONNECTIONS_FILE = path.join(__dirname, 'connections.json');
 
+// ── Logging ──────────────────────────────────────────────────────────────────
+
+const LOGS_DIR = path.join(process.env.USERPROFILE || process.env.HOME, '.openclaw', 'logs');
+const MM_LOG = path.join(LOGS_DIR, 'model-manager.log');
+const MM_LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+
+// Ensure logs directory exists
+try { fs.mkdirSync(LOGS_DIR, { recursive: true }); } catch {}
+
+function mmLog(level, message, details) {
+  try {
+    // Rotate if over max size
+    try {
+      const stat = fs.statSync(MM_LOG);
+      if (stat.size > MM_LOG_MAX_BYTES) {
+        const rotated = MM_LOG + '.1';
+        try { fs.unlinkSync(rotated); } catch {}
+        fs.renameSync(MM_LOG, rotated);
+      }
+    } catch {} // file doesn't exist yet
+    const entry = JSON.stringify({
+      ts: new Date().toISOString(),
+      level,
+      message,
+      ...(details ? { details } : {}),
+    }) + '\n';
+    fs.appendFileSync(MM_LOG, entry, 'utf8');
+  } catch (e) {
+    console.error('[mmLog] failed to write:', e.message);
+  }
+}
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -404,6 +436,7 @@ app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
   }
 
   if (conn.type === 'local') {
+    mmLog('info', `Gateway ${action} requested`, { connId: conn.id, type: 'local' });
     try {
       let out;
       if (action === 'restart' || action === 'stop' || action === 'start') {
@@ -435,22 +468,28 @@ app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
       } else {
         out = await run(`openclaw gateway ${action}`, 20000);
       }
+      mmLog('info', `Gateway ${action} succeeded`, { output: out });
       res.json({ ok: true, message: out || `Gateway ${action} completed` });
     } catch (e) {
+      mmLog('error', `Gateway ${action} failed`, { error: e.message, stdout: e.stdout });
       apiError(res, 500, 'GATEWAY_ERROR', e.message, { stdout: e.stdout });
     }
   } else {
+    mmLog('info', `Gateway ${action} requested (remote)`, { connId: conn.id, host: conn.host });
     // Remote: for restart, try RPC signal; start/stop need SSH or remote agent
     if (action === 'restart') {
       try {
         const result = await remoteMMProxy(conn, '/api/local/gateway/restart', 'POST');
+        mmLog('info', `Remote gateway restart succeeded`, { connId: conn.id });
         res.json({ ok: true, message: 'Restart signal sent', result });
       } catch (e) {
         // Try via CLI with remote flags
         try {
           const out = await run(`openclaw gateway call restart${remoteFlags(conn)}`, 15000);
+          mmLog('info', `Remote gateway restart via CLI succeeded`, { connId: conn.id });
           res.json({ ok: true, message: out || 'Restart requested via CLI' });
         } catch (e2) {
+          mmLog('error', `Remote gateway restart failed`, { connId: conn.id, rpcError: e.message, cliError: e2.message });
           apiError(res, 500, 'GATEWAY_ERROR', `RPC: ${e.message}. CLI: ${e2.message}`);
         }
       }
@@ -458,8 +497,10 @@ app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
       // start/stop on remote — can try CLI with --url flag or inform user
       try {
         const out = await run(`openclaw gateway ${action}${remoteFlags(conn)}`, 15000);
+        mmLog('info', `Remote gateway ${action} succeeded`, { connId: conn.id });
         res.json({ ok: true, message: out || `Gateway ${action} requested` });
       } catch (e) {
+        mmLog('error', `Remote gateway ${action} failed`, { connId: conn.id, error: e.message });
         apiError(res, 500, 'GATEWAY_ERROR', e.message, { hint: `Remote ${action} may require SSH access or a remote agent. Configure SSH tunnel or run openclaw on the remote host.` });
       }
     }
@@ -1877,6 +1918,95 @@ app.get('/api/discover', asyncHandler(async (req, res) => {
   }
 }));
 
+// ── Log Viewer API ───────────────────────────────────────────────────────────
+
+// Validate log filename (prevent path traversal)
+function isValidLogName(name) {
+  return typeof name === 'string' && /^[a-zA-Z0-9._-]+\.(log|jsonl|log\.1)$/.test(name) && !name.includes('..');
+}
+
+// Read last N lines of a file efficiently (tail)
+function tailFile(filePath, lines = 50, offset = 0) {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const allLines = content.split('\n').filter(l => l.trim());
+    const start = Math.max(0, allLines.length - lines - offset);
+    const end = allLines.length - offset;
+    return {
+      lines: allLines.slice(Math.max(0, start), Math.max(0, end)),
+      total: allLines.length,
+    };
+  } catch (e) {
+    return { lines: [], total: 0, error: e.message };
+  }
+}
+
+app.get('/api/logs/list', asyncHandler(async (req, res) => {
+  try {
+    if (!fs.existsSync(LOGS_DIR)) {
+      return res.json({ ok: true, files: [] });
+    }
+    const files = fs.readdirSync(LOGS_DIR)
+      .filter(f => /\.(log|jsonl|log\.1)$/.test(f))
+      .map(name => {
+        const fp = path.join(LOGS_DIR, name);
+        const stat = fs.statSync(fp);
+        return { name, size: stat.size, modified: stat.mtime.toISOString() };
+      })
+      .sort((a, b) => new Date(b.modified) - new Date(a.modified));
+    res.json({ ok: true, files });
+  } catch (e) {
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
+  }
+}));
+
+app.get('/api/logs/:name', asyncHandler(async (req, res) => {
+  const name = req.params.name;
+  if (!isValidLogName(name)) return apiError(res, 400, 'VALIDATION_ERROR', 'Invalid log file name');
+  const filePath = path.join(LOGS_DIR, name);
+  if (!fs.existsSync(filePath)) return apiError(res, 404, 'NOT_FOUND', 'Log file not found');
+
+  const lines = parseInt(req.query.lines) || 100;
+  const offset = parseInt(req.query.offset) || 0;
+  const result = tailFile(filePath, lines, offset);
+  res.json({ ok: true, name, ...result });
+}));
+
+app.get('/api/logs/:name/tail', asyncHandler(async (req, res) => {
+  const name = req.params.name;
+  if (!isValidLogName(name)) return apiError(res, 400, 'VALIDATION_ERROR', 'Invalid log file name');
+  const filePath = path.join(LOGS_DIR, name);
+  if (!fs.existsSync(filePath)) return apiError(res, 404, 'NOT_FOUND', 'Log file not found');
+
+  const result = tailFile(filePath, 50);
+  res.json({ ok: true, name, ...result });
+}));
+
+app.get('/api/logs/:name/download', asyncHandler(async (req, res) => {
+  const name = req.params.name;
+  if (!isValidLogName(name)) return apiError(res, 400, 'VALIDATION_ERROR', 'Invalid log file name');
+  const filePath = path.join(LOGS_DIR, name);
+  if (!fs.existsSync(filePath)) return apiError(res, 404, 'NOT_FOUND', 'Log file not found');
+
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+  fs.createReadStream(filePath).pipe(res);
+}));
+
+app.post('/api/logs/:name/clear', asyncHandler(async (req, res) => {
+  const name = req.params.name;
+  if (!isValidLogName(name)) return apiError(res, 400, 'VALIDATION_ERROR', 'Invalid log file name');
+  const filePath = path.join(LOGS_DIR, name);
+  if (!fs.existsSync(filePath)) return apiError(res, 404, 'NOT_FOUND', 'Log file not found');
+
+  // Rotate instead of delete: rename to .1
+  const rotated = filePath + '.1';
+  try { fs.unlinkSync(rotated); } catch {}
+  fs.renameSync(filePath, rotated);
+  mmLog('info', `Log file rotated: ${name}`);
+  res.json({ ok: true, message: `${name} rotated to ${name}.1` });
+}));
+
 // ── Backward-compat: old routes without connId → use default ─────────────────
 
 function getDefaultConnId() {
@@ -1898,6 +2028,7 @@ for (const oldPath of ['/api/gateway/status', '/api/models/status', '/api/models
 
 app.use((err, req, res, _next) => {
   console.error(`[unhandled] ${req.method} ${req.originalUrl}:`, err);
+  mmLog('error', `Unhandled API error: ${req.method} ${req.originalUrl}`, { error: err.message, stack: err.stack?.split('\n').slice(0, 3).join(' | ') });
   const status = err.status || err.statusCode || 500;
   res.status(status).json({
     ok: false,
@@ -2014,4 +2145,5 @@ wss.on('close', () => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  ⚡ OpenClaw Model Manager running at http://localhost:${PORT}`);
   console.log(`  🌐 Also listening on 0.0.0.0:${PORT} (accessible via Tailscale/LAN)\n`);
+  mmLog('info', 'Model Manager started', { port: PORT, pid: process.pid });
 });
