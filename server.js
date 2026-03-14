@@ -407,11 +407,22 @@ app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
     try {
       let out;
       if (action === 'restart') {
-        // Windows scheduled task restart: stop, wait, then start
+        // Windows scheduled task restart: stop, wait for port free, then start
         // openclaw gateway restart is unreliable (kills process but task has no auto-restart trigger)
         try { await run('openclaw gateway stop', 15000); } catch {}
-        // Wait for process to fully exit
-        await new Promise(r => setTimeout(r, 3000));
+        // Poll until gateway port is actually free (process fully exited, file locks released)
+        const gwPort = conn.port || 18789;
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 1000));
+          try {
+            const check = await run(`netstat -ano | findstr ":${gwPort}.*LISTENING"`, 3000);
+            if (!check || !check.trim()) break; // Port is free
+          } catch {
+            break; // findstr returns non-zero when no match = port is free
+          }
+        }
+        // Extra buffer for file lock release
+        await new Promise(r => setTimeout(r, 2000));
         out = await run('openclaw gateway start', 20000);
       } else {
         out = await run(`openclaw gateway ${action}`, 20000);
