@@ -39,6 +39,18 @@ function updateState(path, value) {
   }
 }
 
+function setState(path, value) { return updateState(path, value); }
+
+function getState(path) {
+  const keys = path.split('.');
+  let obj = AppState;
+  for (const key of keys) {
+    if (obj == null) return undefined;
+    obj = obj[key];
+  }
+  return obj;
+}
+
 function onStateChange(path, callback) {
   if (!_stateListeners[path]) _stateListeners[path] = [];
   _stateListeners[path].push(callback);
@@ -311,18 +323,27 @@ async function fetchGatewayStatusFull() {
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
 
-function showWsStatus(connected) {
+function showWsStatus(state) {
   let el = byId('ws-status');
   if (!el) {
     el = document.createElement('div');
     el.id = 'ws-status';
-    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:var(--danger);color:#fff;text-align:center;padding:4px 8px;font-size:12px;display:none';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;color:#fff;text-align:center;padding:4px 8px;font-size:12px;display:none';
     document.body.prepend(el);
   }
-  if (connected) {
+  if (state === 'connected' || state === true) {
     el.style.display = 'none';
+  } else if (state === 'connecting') {
+    el.textContent = 'Connecting to server…';
+    el.style.background = 'var(--warning, #d97706)';
+    el.style.display = 'block';
+  } else if (state === 'error') {
+    el.textContent = 'Connection error — will retry…';
+    el.style.background = 'var(--danger, #dc2626)';
+    el.style.display = 'block';
   } else {
     el.textContent = 'Connection lost — reconnecting…';
+    el.style.background = 'var(--danger, #dc2626)';
     el.style.display = 'block';
   }
 }
@@ -331,6 +352,7 @@ function connectWebSocket() {
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
 
   updateState('connectionState', 'connecting');
+  showWsStatus('connecting');
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
 
@@ -339,7 +361,7 @@ function connectWebSocket() {
     wsReconnectAttempts = 0;
     updateState('wsConnected', true);
     updateState('connectionState', 'connected');
-    showWsStatus(true);
+    showWsStatus('connected');
     if (wasReconnect) refreshAll();
   };
 
@@ -363,7 +385,7 @@ function connectWebSocket() {
   ws.onclose = () => {
     updateState('wsConnected', false);
     updateState('connectionState', 'disconnected');
-    showWsStatus(false);
+    showWsStatus('disconnected');
     const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts), 30000);
     wsReconnectAttempts++;
     wsReconnectTimer = setTimeout(connectWebSocket, delay);
@@ -371,6 +393,7 @@ function connectWebSocket() {
 
   ws.onerror = () => {
     updateState('connectionState', 'error');
+    showWsStatus('error');
     try { ws.close(); } catch {}
   };
 }
@@ -958,6 +981,9 @@ async function refreshAliases() {
   try {
     const res = await capiRetry('/models/aliases');
     if (res.ok && res.data) {
+      AppState.cache.aliases = res.data;
+      updateState('models.lastUpdate', Date.now());
+      clearStale('alias-list');
       let entries = [];
       if (Array.isArray(res.data)) {
         entries = res.data.map(a => ({ alias: a.alias || a.name || a, model: a.model || a.target || '' }));
@@ -973,20 +999,32 @@ async function refreshAliases() {
         setLoading('aliases', false);
         return;
       }
-      container.innerHTML = entries.map(({ alias, model }) => `
-        <div class="item-row">
-          <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px">
-            <span class="item-label" style="color:var(--warning)">${esc(alias)}</span>
-            <span class="item-arrow">→</span>
-            <span class="item-label">${esc(model)}</span>
-          </div>
-          <button class="btn-remove" onclick="removeAlias('${esc(alias)}')" title="Remove">✕</button>
-        </div>`).join('');
+      renderAliasEntries(container, entries);
+    } else if (AppState.cache.aliases) {
+      markStale('alias-list');
     } else {
       container.innerHTML = '<div class="empty-state">No aliases configured</div>';
     }
-  } catch { container.innerHTML = '<div class="empty-state">Error loading aliases</div>'; }
+  } catch {
+    if (AppState.cache.aliases) {
+      markStale('alias-list');
+    } else {
+      container.innerHTML = '<div class="empty-state">Error loading aliases</div>';
+    }
+  }
   setLoading('aliases', false);
+}
+
+function renderAliasEntries(container, entries) {
+  container.innerHTML = entries.map(({ alias, model }) => `
+    <div class="item-row">
+      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px">
+        <span class="item-label" style="color:var(--warning)">${esc(alias)}</span>
+        <span class="item-arrow">→</span>
+        <span class="item-label">${esc(model)}</span>
+      </div>
+      <button class="btn-remove" onclick="removeAlias('${esc(alias)}')" title="Remove">✕</button>
+    </div>`).join('');
 }
 
 async function addAlias() {
@@ -1074,11 +1112,17 @@ async function refreshAuth() {
         }
       }
       container.innerHTML = allCards.length ? allCards.join('') : '<div class="empty-state">No auth profiles found</div>';
+    } else if (AppState.cache.auth) {
+      markStale('auth-profiles');
     } else {
       container.innerHTML = '<div class="empty-state">Could not load auth profiles</div>';
     }
   } catch (e) {
-    container.innerHTML = `<div class="empty-state">Error: ${esc(e.message)}</div>`;
+    if (AppState.cache.auth) {
+      markStale('auth-profiles');
+    } else {
+      container.innerHTML = `<div class="empty-state">Error: ${esc(e.message)}</div>`;
+    }
   }
   setLoading('auth', false);
 }
