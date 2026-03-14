@@ -515,8 +515,42 @@ app.get('/api/:connId/models/status', asyncHandler(async (req, res) => {
 
   if (conn.type === 'local') {
     try {
-      const raw = await run('openclaw models status --json');
-      res.json({ ok: true, data: tryJsonParse(raw) || raw });
+      // Read config directly instead of CLI (avoids EPERM on models.json)
+      const config = readJsonFile(OPENCLAW_CONFIG);
+      if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read OpenClaw config');
+      const agentDir = path.join(process.env.USERPROFILE || '', '.openclaw', 'agents', 'main', 'agent');
+      const modelsJson = readJsonFile(path.join(agentDir, 'models.json'));
+      const authProfiles = readJsonFile(AUTH_PROFILES);
+
+      const defaults = config?.agents?.defaults || {};
+      const modelConfig = defaults?.model || {};
+      const aliases = {};
+      // Build aliases from config
+      if (config?.agents?.defaults?.models) {
+        for (const [key, val] of Object.entries(config.agents.defaults.models)) {
+          if (val?.alias) aliases[val.alias] = key;
+        }
+      }
+      // Also check model.aliases in config
+      if (modelConfig.aliases) {
+        for (const [alias, model] of Object.entries(modelConfig.aliases)) {
+          aliases[alias] = model;
+        }
+      }
+
+      const data = {
+        configPath: OPENCLAW_CONFIG,
+        agentDir,
+        defaultModel: modelConfig.primary || 'unknown',
+        resolvedDefault: modelConfig.primary || 'unknown',
+        fallbacks: modelConfig.fallbacks || [],
+        imageModel: modelConfig.image || null,
+        imageFallbacks: [],
+        aliases,
+        allowed: modelsJson?.models?.map(m => m.key || m) || [],
+        auth: authProfiles ? { storePath: AUTH_PROFILES, providers: authProfiles.profiles ? Object.keys(authProfiles.profiles).map(k => ({ provider: k.split(':')[0], profileId: k })) : [] } : null
+      };
+      res.json({ ok: true, data });
     } catch (e) {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
@@ -536,9 +570,16 @@ app.get('/api/:connId/models/list', asyncHandler(async (req, res) => {
 
   if (conn.type === 'local') {
     try {
-      const flag = req.query.all === 'true' ? ' --all' : '';
-      const raw = await run(`openclaw models list --json${flag}`, 45000);
-      res.json({ ok: true, data: tryJsonParse(raw) || raw });
+      // Read models.json directly instead of CLI (avoids EPERM on models.json)
+      const agentDir = path.join(process.env.USERPROFILE || '', '.openclaw', 'agents', 'main', 'agent');
+      const modelsJson = readJsonFile(path.join(agentDir, 'models.json'));
+      const models = (modelsJson?.models || []).map(m => ({
+        key: typeof m === 'string' ? m : (m.key || m.id || ''),
+        name: m.name || m.key || '',
+        local: m.local || false,
+        tags: m.tags || [],
+      }));
+      res.json({ ok: true, data: { count: models.length, models } });
     } catch (e) {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
@@ -751,11 +792,11 @@ app.get('/api/:connId/models/available', asyncHandler(async (req, res) => {
 
   try {
     if (conn.type === 'local') {
-      const raw = await run('openclaw models list --json', 45000);
-      const parsed = tryJsonParse(raw);
-      const models = (parsed?.models || []).map(m => ({
-        key: m.key,
-        name: m.name || m.key,
+      const agentDir = path.join(process.env.USERPROFILE || '', '.openclaw', 'agents', 'main', 'agent');
+      const modelsJson = readJsonFile(path.join(agentDir, 'models.json'));
+      const models = (modelsJson?.models || []).map(m => ({
+        key: typeof m === 'string' ? m : (m.key || m.id || ''),
+        name: m.name || m.key || '',
         local: m.local || false,
         tags: m.tags || [],
       }));
