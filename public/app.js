@@ -627,10 +627,14 @@ async function gatewayAction(action) {
         for (let i = 0; i < 15; i++) {
           await new Promise(r => setTimeout(r, 2000));
           try {
-            const health = await api('GET', `/api/${activeConnId}/health`);
-            if (health.ok && isGatewayRunning(health.status)) {
-              online = true;
-              break;
+            // Silent fetch — don't use api() which toasts on every failure
+            const r = await fetch(`/api/${activeConnId}/health`);
+            if (r.ok) {
+              const health = await r.json();
+              if (health.ok && isGatewayRunning(health.status)) {
+                online = true;
+                break;
+              }
             }
           } catch {}
         }
