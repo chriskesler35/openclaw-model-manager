@@ -406,24 +406,32 @@ app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
   if (conn.type === 'local') {
     try {
       let out;
-      if (action === 'restart') {
-        // Windows scheduled task restart: stop, wait for port free, then start
-        // openclaw gateway restart is unreliable (kills process but task has no auto-restart trigger)
-        try { await run('openclaw gateway stop', 15000); } catch {}
-        // Poll until gateway port is actually free (process fully exited, file locks released)
-        const gwPort = conn.port || 18789;
-        for (let i = 0; i < 20; i++) {
-          await new Promise(r => setTimeout(r, 1000));
-          try {
-            const check = await run(`netstat -ano | findstr ":${gwPort}.*LISTENING"`, 3000);
-            if (!check || !check.trim()) break; // Port is free
-          } catch {
-            break; // findstr returns non-zero when no match = port is free
+      if (action === 'restart' || action === 'stop' || action === 'start') {
+        // Use Windows Task Scheduler directly — openclaw CLI has file lock issues (EPERM on models.json)
+        const taskName = 'OpenClaw Gateway';
+
+        if (action === 'restart' || action === 'stop') {
+          try { await run(`cmd /c schtasks /End /TN "${taskName}"`, 10000); } catch {}
+          // Poll until gateway port is actually free (process fully exited, file locks released)
+          const gwPort = conn.port || 18789;
+          for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 1000));
+            try {
+              const check = await run(`cmd /c netstat -ano | findstr ":${gwPort}.*LISTENING"`, 3000);
+              if (!check || !check.trim()) break;
+            } catch {
+              break; // findstr returns non-zero when no match = port is free
+            }
           }
+          // Extra buffer for file locks to fully release
+          await new Promise(r => setTimeout(r, 2000));
         }
-        // Extra buffer for file lock release
-        await new Promise(r => setTimeout(r, 2000));
-        out = await run('openclaw gateway start', 20000);
+
+        if (action === 'restart' || action === 'start') {
+          await run(`cmd /c schtasks /Run /TN "${taskName}"`, 10000);
+        }
+
+        out = `Gateway ${action} completed via Task Scheduler`;
       } else {
         out = await run(`openclaw gateway ${action}`, 20000);
       }
