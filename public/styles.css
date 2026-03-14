@@ -1200,6 +1200,17 @@ table.model-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   margin-bottom: 12px;
 }
 
+/* ── Stale Data Indicator ──────────────────────────────────────────────────── */
+.data-stale { opacity: 0.7; }
+.stale-indicator {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--warning);
+  margin-left: 6px;
+  font-weight: 400;
+  vertical-align: middle;
+}
+
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 @media (max-width: 860px) {
   header { flex-wrap: wrap; gap: 8px; padding: 12px 16px; }

@@ -1,12 +1,81 @@
 // ── State ────────────────────────────────────────────────────────────────────
-let connections = [];
-let activeConnId = 'local';
-let lastGatewayData = null;
-let lastModelsData = null;
 let ws = null;
 let statsInterval = null;
-let wsReconnectAttempts = 0;
 let wsReconnectTimer = null;
+
+// ── Centralized App State ────────────────────────────────────────────────────
+const AppState = {
+  connections: [],
+  activeConnId: 'local',
+  wsConnected: false,
+  wsReconnectAttempts: 0,
+  connectionState: 'disconnected', // disconnected | connecting | connected | error
+  gateway: { status: null, lastUpdate: null },
+  models: { primary: null, fallbacks: [], aliases: {}, available: [], lastUpdate: null },
+  system: { gpu: [], ram: null, lastUpdate: null },
+  providers: { status: {}, lastUpdate: null },
+  auth: { profiles: {}, lastUpdate: null },
+  ui: { activeTab: 'dashboard', loading: {}, errors: {} },
+  cache: {},
+};
+
+const _stateListeners = {};
+
+function updateState(path, value) {
+  const keys = path.split('.');
+  let obj = AppState;
+  for (let i = 0; i < keys.length - 1; i++) {
+    if (obj[keys[i]] == null) obj[keys[i]] = {};
+    obj = obj[keys[i]];
+  }
+  obj[keys[keys.length - 1]] = value;
+  // Notify listeners for this path and parent paths
+  for (const listenerPath of Object.keys(_stateListeners)) {
+    if (path.startsWith(listenerPath) || listenerPath.startsWith(path)) {
+      for (const cb of _stateListeners[listenerPath]) {
+        try { cb(value, path); } catch (e) { console.error('State listener error:', e); }
+      }
+    }
+  }
+}
+
+function onStateChange(path, callback) {
+  if (!_stateListeners[path]) _stateListeners[path] = [];
+  _stateListeners[path].push(callback);
+  return () => {
+    _stateListeners[path] = _stateListeners[path].filter(cb => cb !== callback);
+  };
+}
+
+function setLoading(key, bool) {
+  updateState(`ui.loading.${key}`, bool);
+}
+
+function isLoading(key) {
+  return !!AppState.ui.loading[key];
+}
+
+// Backward-compat getters/setters that delegate to AppState
+Object.defineProperty(window, 'connections', {
+  get() { return AppState.connections; },
+  set(v) { updateState('connections', v); },
+});
+Object.defineProperty(window, 'activeConnId', {
+  get() { return AppState.activeConnId; },
+  set(v) { updateState('activeConnId', v); },
+});
+Object.defineProperty(window, 'lastGatewayData', {
+  get() { return AppState.gateway.status; },
+  set(v) { updateState('gateway.status', v); updateState('gateway.lastUpdate', v ? Date.now() : AppState.gateway.lastUpdate); },
+});
+Object.defineProperty(window, 'lastModelsData', {
+  get() { return AppState.models.primary; },
+  set(v) { updateState('models.primary', v); updateState('models.lastUpdate', v ? Date.now() : AppState.models.lastUpdate); },
+});
+Object.defineProperty(window, 'wsReconnectAttempts', {
+  get() { return AppState.wsReconnectAttempts; },
+  set(v) { updateState('wsReconnectAttempts', v); },
+});
 
 window.addEventListener('unhandledrejection', e => {
   console.error('Unhandled promise rejection:', e.reason);
@@ -107,6 +176,27 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function markStale(elementId) {
+  const el = byId(elementId);
+  if (!el) return;
+  el.classList.add('data-stale');
+  // Add stale indicator if not already present
+  if (!el.querySelector('.stale-indicator')) {
+    const badge = document.createElement('span');
+    badge.className = 'stale-indicator';
+    badge.textContent = '(stale)';
+    el.appendChild(badge);
+  }
+}
+
+function clearStale(elementId) {
+  const el = byId(elementId);
+  if (!el) return;
+  el.classList.remove('data-stale');
+  const badge = el.querySelector('.stale-indicator');
+  if (badge) badge.remove();
+}
+
 function dur(ms) {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -132,6 +222,7 @@ function isGatewayRunning(data) {
 
 // ── Tab Management ───────────────────────────────────────────────────────────
 function switchTab(tabId) {
+  updateState('ui.activeTab', tabId);
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabId));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabId}`));
 
@@ -195,14 +286,27 @@ function refreshAll() {
 
 // Full status (for health tab — can take ~6-8s)
 async function fetchGatewayStatusFull() {
+  setLoading('gateway', true);
   try {
     const res = await capiRetry('/gateway/status');
     if (res.ok) {
       lastGatewayData = res.status;
+      AppState.cache.gateway = res.status;
       updateGatewayUI(res.status);
       refreshHealth();
+    } else if (AppState.cache.gateway) {
+      lastGatewayData = AppState.cache.gateway;
+      updateGatewayUI(AppState.cache.gateway);
+      markStale('gateway-badge');
     }
-  } catch {}
+  } catch {
+    if (AppState.cache.gateway) {
+      lastGatewayData = AppState.cache.gateway;
+      updateGatewayUI(AppState.cache.gateway);
+      markStale('gateway-badge');
+    }
+  }
+  setLoading('gateway', false);
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
@@ -226,12 +330,15 @@ function showWsStatus(connected) {
 function connectWebSocket() {
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
 
+  updateState('connectionState', 'connecting');
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
 
   ws.onopen = () => {
     const wasReconnect = wsReconnectAttempts > 0;
     wsReconnectAttempts = 0;
+    updateState('wsConnected', true);
+    updateState('connectionState', 'connected');
     showWsStatus(true);
     if (wasReconnect) refreshAll();
   };
@@ -254,13 +361,18 @@ function connectWebSocket() {
   };
 
   ws.onclose = () => {
+    updateState('wsConnected', false);
+    updateState('connectionState', 'disconnected');
     showWsStatus(false);
     const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts), 30000);
     wsReconnectAttempts++;
     wsReconnectTimer = setTimeout(connectWebSocket, delay);
   };
 
-  ws.onerror = () => { try { ws.close(); } catch {} };
+  ws.onerror = () => {
+    updateState('connectionState', 'error');
+    try { ws.close(); } catch {}
+  };
 }
 
 // ── Gateway UI ───────────────────────────────────────────────────────────────
@@ -490,29 +602,47 @@ async function gatewayAction(action) {
 // ── Models ───────────────────────────────────────────────────────────────────
 
 async function refreshModels() {
+  setLoading('models', true);
   try {
     const res = await capiRetry('/models/status');
     if (res.ok && res.data) {
       lastModelsData = res.data;
-      const d = res.data;
-      const primary = d.resolvedDefault || d.defaultModel || d.primary || '—';
-      const display = byId('primary-model-display');
-
-      let metaParts = [];
-      const provider = primary.split('/')[0];
-      if (provider && provider !== '—') metaParts.push(`Provider: ${provider}`);
-      if (d.fallbacks?.length) metaParts.push(`${d.fallbacks.length} fallbacks`);
-      if (d.imageModel) metaParts.push(`Image: ${d.imageModel}`);
-
-      display.innerHTML = `
-        <div class="model-name">${esc(primary)}</div>
-        ${metaParts.length ? `<div class="model-meta">${esc(metaParts.join(' · '))}</div>` : ''}
-      `;
+      AppState.cache.models = res.data;
+      renderModelsDisplay(res.data);
+      clearStale('primary-model-display');
+    } else if (AppState.cache.models) {
+      lastModelsData = AppState.cache.models;
+      renderModelsDisplay(AppState.cache.models);
+      markStale('primary-model-display');
     }
   } catch (e) {
-    byId('primary-model-display').innerHTML = `<span class="model-name" style="color:var(--danger)">Error loading</span>`;
+    if (AppState.cache.models) {
+      lastModelsData = AppState.cache.models;
+      renderModelsDisplay(AppState.cache.models);
+      markStale('primary-model-display');
+    } else {
+      byId('primary-model-display').innerHTML = `<span class="model-name" style="color:var(--danger)">Error loading</span>`;
+    }
   }
+  setLoading('models', false);
   refreshModelList();
+}
+
+function renderModelsDisplay(data) {
+  const d = data;
+  const primary = d.resolvedDefault || d.defaultModel || d.primary || '—';
+  const display = byId('primary-model-display');
+
+  let metaParts = [];
+  const provider = primary.split('/')[0];
+  if (provider && provider !== '—') metaParts.push(`Provider: ${provider}`);
+  if (d.fallbacks?.length) metaParts.push(`${d.fallbacks.length} fallbacks`);
+  if (d.imageModel) metaParts.push(`Image: ${d.imageModel}`);
+
+  display.innerHTML = `
+    <div class="model-name">${esc(primary)}</div>
+    ${metaParts.length ? `<div class="model-meta">${esc(metaParts.join(' · '))}</div>` : ''}
+  `;
 }
 
 async function setModel() {
@@ -600,6 +730,7 @@ let dragSrcIndex = null;
 
 async function refreshFallbacks() {
   const container = byId('fallback-tiles');
+  setLoading('fallbacks', true);
 
   // Load fallbacks and available models in parallel
   const [fbRes, modRes] = await Promise.all([
@@ -612,16 +743,19 @@ async function refreshFallbacks() {
     const list = Array.isArray(fbRes.data) ? fbRes.data : (fbRes.data.fallbacks || []);
     fallbackList = list.map(f => typeof f === 'string' ? f : (f.model || f.id || f));
     fallbackOriginal = [...fallbackList];
+    updateState('models.fallbacks', fallbackList);
   }
 
   // Parse available models
   if (modRes.ok && modRes.models) {
     allAvailableModels = modRes.models;
+    updateState('models.available', modRes.models);
   }
 
   renderFallbackTiles();
   populateFallbackDropdown();
   updateFallbackDirty();
+  setLoading('fallbacks', false);
 }
 
 function renderFallbackTiles() {
@@ -820,6 +954,7 @@ async function clearFallbacks() {
 
 async function refreshAliases() {
   const container = byId('alias-list');
+  setLoading('aliases', true);
   try {
     const res = await capiRetry('/models/aliases');
     if (res.ok && res.data) {
@@ -832,8 +967,10 @@ async function refreshAliases() {
           alias, model: typeof model === 'string' ? model : (model.model || JSON.stringify(model))
         }));
       }
+      updateState('models.aliases', entries.reduce((acc, e) => { acc[e.alias] = e.model; return acc; }, {}));
       if (entries.length === 0) {
         container.innerHTML = '<div class="empty-state">No aliases configured. Create short names for your favorite models.</div>';
+        setLoading('aliases', false);
         return;
       }
       container.innerHTML = entries.map(({ alias, model }) => `
@@ -849,6 +986,7 @@ async function refreshAliases() {
       container.innerHTML = '<div class="empty-state">No aliases configured</div>';
     }
   } catch { container.innerHTML = '<div class="empty-state">Error loading aliases</div>'; }
+  setLoading('aliases', false);
 }
 
 async function addAlias() {
@@ -874,9 +1012,14 @@ async function removeAlias(alias) {
 
 async function refreshAuth() {
   const container = byId('auth-profiles');
+  setLoading('auth', true);
   try {
     const res = await capiRetry('/auth/profiles');
     if (res.ok && res.data) {
+      AppState.cache.auth = res.data;
+      updateState('auth.profiles', res.data);
+      updateState('auth.lastUpdate', Date.now());
+      clearStale('auth-profiles');
       const allCards = [];
       for (const [agentId, agentData] of Object.entries(res.data)) {
         const profiles = agentData.profiles || [];
@@ -937,6 +1080,7 @@ async function refreshAuth() {
   } catch (e) {
     container.innerHTML = `<div class="empty-state">Error: ${esc(e.message)}</div>`;
   }
+  setLoading('auth', false);
 }
 
 // ── Credential Management ────────────────────────────────────────────────────
@@ -1705,9 +1849,18 @@ async function refreshProviderStatus() {
   const container = byId('provider-failover');
   if (!container) return;
 
+  setLoading('providers', true);
   try {
     const res = await capiRetry('/providers/status');
-    if (!res.ok) return;
+    if (!res.ok) {
+      if (AppState.cache.providers) markStale('provider-failover');
+      setLoading('providers', false);
+      return;
+    }
+    AppState.cache.providers = res;
+    updateState('providers.status', res.providers || {});
+    updateState('providers.lastUpdate', Date.now());
+    clearStale('provider-failover');
 
     const { primary, fallbacks, providers } = res;
     const anyInCooldown = Object.values(providers).some(p => p.inCooldown || p.isDisabled);
@@ -1795,17 +1948,23 @@ async function refreshProviderStatus() {
     }
 
   } catch (e) {
-    container.innerHTML = `<div class="failover-panel" style="border-color:var(--danger)">
-      <div class="failover-header">
-        <span class="failover-title">⚠️ Provider Status Unavailable</span>
-        <button class="btn btn-sm" onclick="refreshProviderStatus()">↻ Retry</button>
-      </div>
-      <div style="font-size:12px;color:var(--text-dim);margin-top:8px">
-        Could not load provider status: ${esc(e.message)}<br>
-        <small>This may happen if the remote Model Manager is unreachable or still starting up.</small>
-      </div>
-    </div>`;
+    // Preserve stale data on transient errors, show error panel if no cached data
+    if (AppState.cache.providers) {
+      markStale('provider-failover');
+    } else {
+      container.innerHTML = `<div class="failover-panel" style="border-color:var(--danger)">
+        <div class="failover-header">
+          <span class="failover-title">⚠️ Provider Status Unavailable</span>
+          <button class="btn btn-sm" onclick="refreshProviderStatus()">↻ Retry</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-top:8px">
+          Could not load provider status: ${esc(e.message)}<br>
+          <small>This may happen if the remote Model Manager is unreachable or still starting up.</small>
+        </div>
+      </div>`;
+    }
   }
+  setLoading('providers', false);
 }
 
 function formatCooldown(seconds) {
@@ -1853,9 +2012,19 @@ async function refreshSystemStats() {
   const container = byId('live-system-stats');
   if (!container) return;
 
+  setLoading('system', true);
   try {
     const res = await capiRetry('/system/stats');
-    if (!res?.ok || !res.data) return;
+    if (!res?.ok || !res.data) {
+      if (AppState.cache.system) markStale('live-system-stats');
+      setLoading('system', false);
+      return;
+    }
+    AppState.cache.system = res.data;
+    updateState('system.gpu', res.data.gpus || []);
+    updateState('system.ram', res.data.ram || null);
+    updateState('system.lastUpdate', Date.now());
+    clearStale('live-system-stats');
 
     const { gpus, ram } = res.data;
     let cards = [];
@@ -2003,7 +2172,9 @@ async function refreshSystemStats() {
     }
   } catch (e) {
     // Don't overwrite on transient errors — keep last good state
+    if (AppState.cache.system) markStale('live-system-stats');
   }
+  setLoading('system', false);
 }
 
 // ── Local Models & System Info ────────────────────────────────────────────────
