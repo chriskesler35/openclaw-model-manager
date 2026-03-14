@@ -2007,6 +2007,261 @@ app.post('/api/logs/:name/clear', asyncHandler(async (req, res) => {
   res.json({ ok: true, message: `${name} rotated to ${name}.1` });
 }));
 
+// ── Routing Profiles ─────────────────────────────────────────────────────────
+
+const ROUTING_CONFIG = path.join(__dirname, 'routing.json');
+const COSTS_FILE = path.join(__dirname, 'costs.json');
+
+const DEFAULT_PROFILES = [
+  {
+    id: 'cloud-first',
+    name: 'Cloud First',
+    description: 'Maximum capability — use the most powerful cloud model as primary',
+    rules: [
+      { condition: 'default', model: 'anthropic/claude-opus-4-6' },
+    ],
+    primary: 'anthropic/claude-opus-4-6',
+    fallbacks: ['google/gemini-2.5-pro', 'anthropic/claude-sonnet-4-6', 'openrouter/auto'],
+  },
+  {
+    id: 'local-first',
+    name: 'Local First',
+    description: 'Cost saving — route to local GPU models, fall back to cloud only when needed',
+    rules: [
+      { condition: 'cost-saving', model: 'ollama/qwen2.5-coder:32b', description: 'Route to local when possible' },
+    ],
+    primary: 'ollama/qwen2.5-coder:32b',
+    fallbacks: ['ollama/qwen2.5-coder:14b', 'anthropic/claude-opus-4-6', 'openrouter/auto'],
+  },
+  {
+    id: 'balanced',
+    name: 'Balanced',
+    description: 'Best of both worlds — mid-tier cloud primary with local fallback',
+    rules: [
+      { condition: 'default', model: 'anthropic/claude-sonnet-4-6' },
+      { condition: 'cost-saving', model: 'ollama/qwen2.5-coder:32b', description: 'Route to local when possible' },
+    ],
+    primary: 'anthropic/claude-sonnet-4-6',
+    fallbacks: ['ollama/qwen2.5-coder:32b', 'anthropic/claude-opus-4-6', 'openrouter/auto'],
+  },
+];
+
+function loadRoutingConfig() {
+  if (fs.existsSync(ROUTING_CONFIG)) {
+    try { return JSON.parse(fs.readFileSync(ROUTING_CONFIG, 'utf8')); } catch {}
+  }
+  // Auto-create with defaults
+  const data = { activeProfileId: null, profiles: DEFAULT_PROFILES };
+  fs.writeFileSync(ROUTING_CONFIG, JSON.stringify(data, null, 2), 'utf8');
+  return data;
+}
+
+function saveRoutingConfig(data) {
+  fs.writeFileSync(ROUTING_CONFIG, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// List all profiles + active
+app.get('/api/routing/profiles', asyncHandler(async (req, res) => {
+  const data = loadRoutingConfig();
+  res.json({ ok: true, profiles: data.profiles, activeProfileId: data.activeProfileId });
+}));
+
+// Create profile
+app.post('/api/routing/profiles', asyncHandler(async (req, res) => {
+  const { name, description, rules, primary, fallbacks } = req.body;
+  if (!validate.isNonEmptyString(name)) return apiError(res, 400, 'VALIDATION_ERROR', 'name is required');
+  if (!validate.isValidModelId(primary)) return apiError(res, 400, 'VALIDATION_ERROR', 'primary must be a valid model ID');
+  if (!Array.isArray(fallbacks)) return apiError(res, 400, 'VALIDATION_ERROR', 'fallbacks must be an array');
+
+  const data = loadRoutingConfig();
+  const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
+  if (data.profiles.find(p => p.id === id)) {
+    return apiError(res, 409, 'CONFLICT', `Profile "${id}" already exists`);
+  }
+
+  data.profiles.push({ id, name, description: description || '', rules: rules || [], primary, fallbacks });
+  saveRoutingConfig(data);
+  mmLog('info', `Routing profile created: ${name}`, { id, primary });
+  res.json({ ok: true, id });
+}));
+
+// Update profile
+app.put('/api/routing/profiles/:id', asyncHandler(async (req, res) => {
+  const data = loadRoutingConfig();
+  const profile = data.profiles.find(p => p.id === req.params.id);
+  if (!profile) return apiError(res, 404, 'NOT_FOUND', 'Profile not found');
+
+  const { name, description, rules, primary, fallbacks } = req.body;
+  if (name !== undefined) profile.name = name;
+  if (description !== undefined) profile.description = description;
+  if (rules !== undefined) profile.rules = rules;
+  if (primary !== undefined) profile.primary = primary;
+  if (fallbacks !== undefined) profile.fallbacks = fallbacks;
+
+  saveRoutingConfig(data);
+  mmLog('info', `Routing profile updated: ${profile.name}`, { id: profile.id });
+  res.json({ ok: true });
+}));
+
+// Delete profile
+app.delete('/api/routing/profiles/:id', asyncHandler(async (req, res) => {
+  const data = loadRoutingConfig();
+  const idx = data.profiles.findIndex(p => p.id === req.params.id);
+  if (idx === -1) return apiError(res, 404, 'NOT_FOUND', 'Profile not found');
+
+  const removed = data.profiles.splice(idx, 1)[0];
+  if (data.activeProfileId === req.params.id) data.activeProfileId = null;
+  saveRoutingConfig(data);
+  mmLog('info', `Routing profile deleted: ${removed.name}`, { id: removed.id });
+  res.json({ ok: true });
+}));
+
+// Activate profile — writes primary + fallbacks to openclaw.json
+app.post('/api/routing/profiles/:id/activate', asyncHandler(async (req, res) => {
+  const data = loadRoutingConfig();
+  const profile = data.profiles.find(p => p.id === req.params.id);
+  if (!profile) return apiError(res, 404, 'NOT_FOUND', 'Profile not found');
+
+  // Write to openclaw.json
+  const config = readJsonFile(OPENCLAW_CONFIG);
+  if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read OpenClaw config');
+
+  config.agents = config.agents || {};
+  config.agents.defaults = config.agents.defaults || {};
+  config.agents.defaults.model = config.agents.defaults.model || {};
+  config.agents.defaults.model.id = profile.primary;
+  config.agents.defaults.model.fallbacks = profile.fallbacks;
+  writeJsonFile(OPENCLAW_CONFIG, config);
+
+  data.activeProfileId = profile.id;
+  saveRoutingConfig(data);
+
+  mmLog('info', `Routing profile activated: ${profile.name}`, { id: profile.id, primary: profile.primary, fallbacks: profile.fallbacks });
+  res.json({
+    ok: true,
+    message: `Profile "${profile.name}" activated — primary: ${profile.primary}`,
+    warning: 'Changes take effect on next session, or restart the gateway now.',
+  });
+}));
+
+// ── Cost Dashboard ───────────────────────────────────────────────────────────
+
+const MODEL_PRICING = {
+  'anthropic/claude-opus-4-6': { input: 15, output: 75, cacheRead: 1.50 },
+  'claude-opus-4-6': { input: 15, output: 75, cacheRead: 1.50 },
+  'anthropic/claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.30 },
+  'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.30 },
+  'anthropic/claude-sonnet-4-5-20250929': { input: 3, output: 15, cacheRead: 0.30 },
+  'google/gemini-2.5-pro': { input: 1.25, output: 10, cacheRead: 0 },
+  'google/gemini-2.5-flash': { input: 0.15, output: 0.60, cacheRead: 0 },
+  'openrouter/auto': { input: 2, output: 8, cacheRead: 0 },
+};
+
+function getModelPricing(modelId) {
+  // Try exact match first
+  if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
+  // Try without provider prefix
+  const short = modelId.includes('/') ? modelId.split('/').pop() : modelId;
+  if (MODEL_PRICING[short]) return MODEL_PRICING[short];
+  // Local models are free
+  if (modelId.startsWith('ollama/')) return { input: 0, output: 0, cacheRead: 0 };
+  // Unknown cloud model — estimate
+  return { input: 3, output: 15, cacheRead: 0.30 };
+}
+
+function isLocalModel(modelId) {
+  return modelId && (modelId.startsWith('ollama/') || modelId.startsWith('ollama:'));
+}
+
+function loadCosts() {
+  try {
+    if (fs.existsSync(COSTS_FILE)) return JSON.parse(fs.readFileSync(COSTS_FILE, 'utf8'));
+  } catch {}
+  return { days: {} };
+}
+
+function saveCosts(data) {
+  fs.writeFileSync(COSTS_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// GET /api/routing/costs — compute cost estimate from gateway status
+app.get('/api/routing/costs', asyncHandler(async (req, res) => {
+  try {
+    // Try to get session token data from gateway
+    let sessions = [];
+    try {
+      const raw = await run('openclaw gateway call status --json', 10000);
+      const parsed = tryJsonParse(raw);
+      if (parsed?.sessions) sessions = parsed.sessions;
+      else if (parsed?.status?.sessions) sessions = parsed.status.sessions;
+      else if (Array.isArray(parsed)) sessions = parsed;
+    } catch {}
+
+    // Calculate costs per model
+    const modelCosts = {};
+    let totalCost = 0;
+    let totalLocalTokens = 0;
+    let totalCloudTokens = 0;
+
+    for (const session of sessions) {
+      const model = session.model || session.modelId || 'unknown';
+      const input = session.inputTokens || session.input_tokens || 0;
+      const output = session.outputTokens || session.output_tokens || 0;
+      const cacheRead = session.cacheRead || session.cache_read_tokens || 0;
+      const pricing = getModelPricing(model);
+      const cost = (input * pricing.input + output * pricing.output + cacheRead * pricing.cacheRead) / 1_000_000;
+
+      if (!modelCosts[model]) modelCosts[model] = { input: 0, output: 0, cacheRead: 0, cost: 0, local: isLocalModel(model) };
+      modelCosts[model].input += input;
+      modelCosts[model].output += output;
+      modelCosts[model].cacheRead += cacheRead;
+      modelCosts[model].cost += cost;
+
+      totalCost += cost;
+      if (isLocalModel(model)) totalLocalTokens += input + output;
+      else totalCloudTokens += input + output;
+    }
+
+    // What would it cost if all local tokens went to cloud (opus pricing)?
+    const opusPricing = MODEL_PRICING['anthropic/claude-opus-4-6'];
+    const savedByCost = (totalLocalTokens * ((opusPricing.input + opusPricing.output) / 2)) / 1_000_000;
+
+    // Store daily summary
+    const costs = loadCosts();
+    const today = new Date().toISOString().slice(0, 10);
+    costs.days[today] = { totalCost, modelCosts, totalLocalTokens, totalCloudTokens, savedByCost, updatedAt: new Date().toISOString() };
+    saveCosts(costs);
+
+    res.json({
+      ok: true,
+      today: {
+        totalCost,
+        modelCosts,
+        totalLocalTokens,
+        totalCloudTokens,
+        savedByCost,
+        localRatio: (totalLocalTokens + totalCloudTokens) > 0
+          ? Math.round((totalLocalTokens / (totalLocalTokens + totalCloudTokens)) * 100)
+          : 0,
+      },
+    });
+  } catch (e) {
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
+  }
+}));
+
+// GET /api/routing/costs/history — daily cost history
+app.get('/api/routing/costs/history', asyncHandler(async (req, res) => {
+  const costs = loadCosts();
+  // Return last 7 days
+  const days = Object.entries(costs.days || {})
+    .sort(([a], [b]) => b.localeCompare(a))
+    .slice(0, 7)
+    .reverse()
+    .map(([date, data]) => ({ date, ...data }));
+  res.json({ ok: true, days });
+}));
+
 // ── Backward-compat: old routes without connId → use default ─────────────────
 
 function getDefaultConnId() {

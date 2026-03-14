@@ -34,6 +34,9 @@
       <button class="tab active" data-tab="health" onclick="switchTab('health')">
         <span class="tab-icon">💊</span> Health
       </button>
+      <button class="tab" data-tab="routing" onclick="switchTab('routing')">
+        <span class="tab-icon">🔀</span> Routing
+      </button>
       <button class="tab" data-tab="logs" onclick="switchTab('logs')">
         <span class="tab-icon">📋</span> Logs
       </button>
@@ -81,6 +84,109 @@
         <!-- Health Cards -->
         <div id="health-report" class="health-report" style="margin-top:20px">
           <div class="empty-state">Loading health report…</div>
+        </div>
+      </section>
+
+      <!-- ROUTING TAB -->
+      <section class="tab-panel" id="panel-routing">
+        <div class="panel-header">
+          <h2>Routing & Costs</h2>
+          <div class="header-controls">
+            <button class="btn btn-sm" onclick="refreshRouting()">↻ Refresh</button>
+          </div>
+        </div>
+        <div class="panel-content">
+
+          <!-- Cost Summary Cards -->
+          <div class="stats-grid" id="cost-summary" style="margin-bottom:24px">
+            <div class="stat-card">
+              <span class="stat-label">Today's Cost</span>
+              <span id="cost-today" class="stat-value" style="color:var(--success)">$0.00</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Est. Monthly</span>
+              <span id="cost-monthly" class="stat-value">$0.00</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Saved by Local</span>
+              <span id="cost-saved" class="stat-value" style="color:var(--success)">$0.00</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Local vs Cloud</span>
+              <div id="cost-ratio-bar" class="ratio-bar-wrap">
+                <div class="ratio-bar">
+                  <div class="ratio-bar-local" style="width:0%"></div>
+                </div>
+                <span class="ratio-label">0% local</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 7-Day Cost Chart -->
+          <div class="sub-section">
+            <h3>Last 7 Days</h3>
+            <div id="cost-chart" class="cost-chart">
+              <div class="empty-state">Loading cost history…</div>
+            </div>
+          </div>
+
+          <!-- Per-Model Breakdown -->
+          <div class="sub-section" style="margin-top:24px">
+            <h3>Per-Model Breakdown</h3>
+            <div id="cost-breakdown" class="model-table-wrap">
+              <div class="empty-state">Loading…</div>
+            </div>
+          </div>
+
+          <!-- Active Profile -->
+          <div class="sub-section" style="margin-top:32px">
+            <h3>Active Routing Profile</h3>
+            <div id="active-profile-card" class="active-profile-card">
+              <div class="empty-state">No profile active — select one below</div>
+            </div>
+          </div>
+
+          <!-- Profile Cards -->
+          <div class="sub-section" style="margin-top:24px">
+            <h3>Available Profiles</h3>
+            <div id="routing-profiles" class="routing-profiles-grid">
+              <div class="empty-state">Loading profiles…</div>
+            </div>
+          </div>
+
+          <!-- Custom Profile Editor -->
+          <div class="sub-section" style="margin-top:24px">
+            <h3>Create Custom Profile</h3>
+            <div class="form-grid">
+              <div class="form-field">
+                <label>Profile Name</label>
+                <input type="text" id="rp-name" placeholder="e.g. Night Owl, Budget Mode">
+              </div>
+              <div class="form-field">
+                <label>Description</label>
+                <input type="text" id="rp-desc" placeholder="Short description of this profile">
+              </div>
+              <div class="form-field">
+                <label>Primary Model</label>
+                <input type="text" id="rp-primary" placeholder="e.g. ollama/qwen2.5-coder:32b">
+              </div>
+              <div class="form-field">
+                <label>Fallbacks <span class="optional">(comma-separated)</span></label>
+                <input type="text" id="rp-fallbacks" placeholder="e.g. ollama/qwen2.5-coder:14b, anthropic/claude-opus-4-6">
+              </div>
+            </div>
+            <button class="btn btn-primary" onclick="createRoutingProfile()" style="margin-top:12px">Create Profile</button>
+            <div id="rp-feedback" class="feedback"></div>
+          </div>
+
+          <!-- Gateway restart note -->
+          <div class="gateway-warning" style="margin-top:24px">
+            <span class="warning-icon">⚠️</span>
+            <div>
+              <strong>Profile changes write to openclaw.json.</strong> Changes take effect on next session. You can also restart the gateway for immediate effect.
+              <button class="btn btn-sm btn-warning" onclick="gatewayAction('restart')" style="margin-left:8px">↻ Restart Gateway</button>
+            </div>
+          </div>
         </div>
       </section>
 

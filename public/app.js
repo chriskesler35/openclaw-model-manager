@@ -245,6 +245,7 @@ function switchTab(tabId) {
 
   // Lazy-load data for tabs
   if (tabId === 'health') { refreshHealth(); refreshProviderStatus(); }
+  if (tabId === 'routing') refreshRouting();
   if (tabId === 'logs') refreshLogFiles();
   if (tabId === 'fallbacks') refreshFallbacks();
   if (tabId === 'local') refreshLocalModels();
@@ -2550,5 +2551,199 @@ async function clearLogFile() {
   if (res.ok) {
     toast(res.message || 'Log rotated', 'success');
     refreshLogFiles();
+  }
+}
+
+// ── Routing & Cost Dashboard ─────────────────────────────────────────────────
+
+function modelIcon(modelId) {
+  if (!modelId) return '';
+  if (modelId.startsWith('ollama/') || modelId.startsWith('ollama:')) return '<span title="Local GPU">🏠</span>';
+  return '<span title="Cloud API">☁️</span>';
+}
+
+function costColor(cost) {
+  if (cost === 0) return 'var(--success)';
+  if (cost < 0.50) return 'var(--warning)';
+  return 'var(--danger)';
+}
+
+async function refreshRouting() {
+  const [profilesRes, costsRes, historyRes] = await Promise.all([
+    api('GET', '/api/routing/profiles'),
+    api('GET', '/api/routing/costs'),
+    api('GET', '/api/routing/costs/history'),
+  ]);
+
+  if (profilesRes.ok) renderRoutingProfiles(profilesRes.profiles, profilesRes.activeProfileId);
+  if (costsRes.ok) renderCostSummary(costsRes.today);
+  if (historyRes.ok) renderCostChart(historyRes.days);
+}
+
+function renderCostSummary(today) {
+  if (!today) return;
+
+  const todayEl = byId('cost-today');
+  const monthlyEl = byId('cost-monthly');
+  const savedEl = byId('cost-saved');
+  const ratioWrap = byId('cost-ratio-bar');
+
+  const todayCost = today.totalCost || 0;
+  todayEl.textContent = '$' + todayCost.toFixed(2);
+  todayEl.style.color = costColor(todayCost);
+
+  // Estimate monthly: today * 30
+  const monthly = todayCost * 30;
+  monthlyEl.textContent = '$' + monthly.toFixed(2);
+  monthlyEl.style.color = costColor(monthly);
+
+  const saved = today.savedByCost || 0;
+  savedEl.textContent = '$' + saved.toFixed(2);
+
+  const localRatio = today.localRatio || 0;
+  ratioWrap.innerHTML = `
+    <div class="ratio-bar">
+      <div class="ratio-bar-local" style="width:${localRatio}%"></div>
+    </div>
+    <span class="ratio-label">${localRatio}% local</span>
+  `;
+
+  // Per-model breakdown table
+  const breakdown = byId('cost-breakdown');
+  const models = Object.entries(today.modelCosts || {});
+  if (models.length === 0) {
+    breakdown.innerHTML = '<div class="empty-state">No token usage data available yet.</div>';
+    return;
+  }
+
+  const totalTokens = models.reduce((sum, [, m]) => sum + m.input + m.output + m.cacheRead, 0);
+  const rows = models
+    .sort((a, b) => b[1].cost - a[1].cost)
+    .map(([model, data]) => {
+      const tokens = data.input + data.output + data.cacheRead;
+      const pct = totalTokens > 0 ? Math.round((tokens / totalTokens) * 100) : 0;
+      const costStr = data.local ? 'Free' : '$' + data.cost.toFixed(4);
+      const costCls = data.local ? 'cost-free' : data.cost > 1 ? 'cost-high' : 'cost-mid';
+      return `<tr>
+        <td>${modelIcon(model)} ${esc(model)}</td>
+        <td class="mono">${tokens.toLocaleString()}</td>
+        <td class="${costCls}">${costStr}</td>
+        <td>${pct}%</td>
+      </tr>`;
+    }).join('');
+
+  breakdown.innerHTML = `<table class="cost-table">
+    <thead><tr><th>Model</th><th>Tokens</th><th>Cost</th><th>Share</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function renderCostChart(days) {
+  const chart = byId('cost-chart');
+  if (!days || days.length === 0) {
+    chart.innerHTML = '<div class="empty-state">No cost history yet.</div>';
+    return;
+  }
+
+  const maxCost = Math.max(...days.map(d => d.totalCost || 0), 0.01);
+
+  const bars = days.map(d => {
+    const cost = d.totalCost || 0;
+    const heightPct = Math.max((cost / maxCost) * 100, 2);
+    const dateLabel = d.date.slice(5); // MM-DD
+    const barColor = cost === 0 ? 'var(--success)' : cost > 2 ? 'var(--danger)' : 'var(--warning)';
+    return `<div class="chart-col">
+      <div class="chart-value">$${cost.toFixed(2)}</div>
+      <div class="chart-bar" style="height:${heightPct}%;background:${barColor}"></div>
+      <div class="chart-label">${esc(dateLabel)}</div>
+    </div>`;
+  }).join('');
+
+  chart.innerHTML = `<div class="chart-bars">${bars}</div>`;
+}
+
+function renderRoutingProfiles(profiles, activeId) {
+  // Active profile card
+  const activeCard = byId('active-profile-card');
+  const active = profiles.find(p => p.id === activeId);
+  if (active) {
+    activeCard.innerHTML = `
+      <div class="rp-active-inner">
+        <div class="rp-active-badge">Active</div>
+        <div class="rp-active-name">${modelIcon(active.primary)} ${esc(active.name)}</div>
+        <div class="rp-active-desc">${esc(active.description)}</div>
+        <div class="rp-chain">
+          <strong>Primary:</strong> ${modelIcon(active.primary)} <code>${esc(active.primary)}</code>
+          <span style="margin:0 8px;color:var(--text-label)">→</span>
+          ${active.fallbacks.map(f => `${modelIcon(f)} <code>${esc(f)}</code>`).join(' → ')}
+        </div>
+      </div>`;
+  } else {
+    activeCard.innerHTML = '<div class="empty-state">No profile active — select one below to configure your routing strategy</div>';
+  }
+
+  // Profile grid
+  const grid = byId('routing-profiles');
+  grid.innerHTML = profiles.map(p => {
+    const isActive = p.id === activeId;
+    return `<div class="rp-card ${isActive ? 'rp-card-active' : ''}" onclick="activateProfile('${esc(p.id)}')">
+      <div class="rp-card-header">
+        <span class="rp-card-name">${esc(p.name)}</span>
+        ${isActive ? '<span class="rp-card-badge">Active</span>' : ''}
+      </div>
+      <div class="rp-card-desc">${esc(p.description)}</div>
+      <div class="rp-card-chain">
+        ${modelIcon(p.primary)} <code>${esc(p.primary)}</code>
+        ${p.fallbacks.slice(0, 3).map(f => `<span class="rp-arrow">→</span> ${modelIcon(f)} <code>${esc(f)}</code>`).join('')}
+        ${p.fallbacks.length > 3 ? `<span class="rp-arrow">→</span> <span class="text-dim">+${p.fallbacks.length - 3} more</span>` : ''}
+      </div>
+      <div class="rp-card-actions">
+        ${isActive ? '<span class="text-dim">Currently active</span>' : `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); activateProfile('${esc(p.id)}')">Activate</button>`}
+        ${!['cloud-first','local-first','balanced'].includes(p.id) ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteRoutingProfile('${esc(p.id)}')">Delete</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function activateProfile(id) {
+  const res = await api('POST', `/api/routing/profiles/${encodeURIComponent(id)}/activate`);
+  if (res.ok) {
+    toast(res.message || 'Profile activated', 'success');
+    if (res.warning) toast(res.warning, 'warning');
+    refreshRouting();
+    refreshModels();
+  }
+}
+
+async function createRoutingProfile() {
+  const name = byId('rp-name').value.trim();
+  const desc = byId('rp-desc').value.trim();
+  const primary = byId('rp-primary').value.trim();
+  const fallbacksStr = byId('rp-fallbacks').value.trim();
+
+  if (!name || !primary) {
+    feedback('rp-feedback', 'Name and primary model are required', 'error');
+    return;
+  }
+
+  const fallbacks = fallbacksStr ? fallbacksStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+  const res = await api('POST', '/api/routing/profiles', { name, description: desc, primary, fallbacks });
+  if (res.ok) {
+    toast('Profile created', 'success');
+    byId('rp-name').value = '';
+    byId('rp-desc').value = '';
+    byId('rp-primary').value = '';
+    byId('rp-fallbacks').value = '';
+    refreshRouting();
+  }
+}
+
+async function deleteRoutingProfile(id) {
+  if (!confirm('Delete this routing profile?')) return;
+  const res = await api('DELETE', `/api/routing/profiles/${encodeURIComponent(id)}`);
+  if (res.ok) {
+    toast('Profile deleted', 'success');
+    refreshRouting();
   }
 }
