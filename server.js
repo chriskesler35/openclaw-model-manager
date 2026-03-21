@@ -841,12 +841,38 @@ app.get('/api/:connId/models/available', asyncHandler(async (req, res) => {
     if (conn.type === 'local') {
       const agentDir = path.join(process.env.USERPROFILE || '', '.openclaw', 'agents', 'main', 'agent');
       const modelsJson = readJsonFile(path.join(agentDir, 'models.json'));
-      const models = (modelsJson?.models || []).map(m => ({
-        key: typeof m === 'string' ? m : (m.key || m.id || ''),
-        name: m.name || m.key || '',
-        local: m.local || false,
-        tags: m.tags || [],
-      }));
+
+      let models = [];
+
+      // New format: { providers: { providerName: { models: [...] } } }
+      if (modelsJson?.providers) {
+        for (const [providerName, providerData] of Object.entries(modelsJson.providers)) {
+          const provModels = providerData.models || [];
+          for (const m of provModels) {
+            const modelId = m.id || m.key || '';
+            if (!modelId) continue;
+            // Build full key — some models may already include provider prefix
+            const key = modelId.includes('/') ? modelId : `${providerName}/${modelId}`;
+            const isLocal = providerName === 'ollama' || providerData.api === 'ollama';
+            models.push({
+              key,
+              name: m.name || modelId,
+              local: isLocal,
+              tags: m.tags || [],
+              provider: providerName,
+            });
+          }
+        }
+      } else {
+        // Legacy flat array format: { models: [...] }
+        models = (modelsJson?.models || []).map(m => ({
+          key: typeof m === 'string' ? m : (m.key || m.id || ''),
+          name: m.name || m.key || '',
+          local: m.local || false,
+          tags: m.tags || [],
+        }));
+      }
+
       res.json({ ok: true, models });
     } else {
       const result = await remoteMMProxy(conn, '/api/local/models/available');
