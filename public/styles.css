@@ -1221,6 +1221,319 @@ table.model-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   margin-bottom: 12px;
 }
 
+/* ── Stale Data Indicator ──────────────────────────────────────────────────── */
+.data-stale { opacity: 0.7; }
+.stale-indicator {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--warning);
+  margin-left: 6px;
+  font-weight: 400;
+  vertical-align: middle;
+}
+
+/* ── Log Viewer ──────────────────────────────────────────────────────────── */
+.log-viewer {
+  background: #0a0c12;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 600px;
+  overflow-y: auto;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-viewer .empty-state { font-family: var(--font); }
+.log-line { padding: 1px 0; }
+.log-line-error { color: var(--danger); }
+.log-line-warn { color: var(--warning); }
+.log-line-info { color: var(--text-dim); }
+.log-line-ts { color: var(--text-label); margin-right: 8px; }
+.log-line-level { font-weight: 600; margin-right: 8px; text-transform: uppercase; min-width: 48px; display: inline-block; }
+.log-line-msg { color: var(--text); }
+.log-status { font-size: 11px; color: var(--text-dim); margin-top: 8px; }
+
+#log-file-select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--font);
+}
+
+/* ── Routing & Cost Dashboard ─────────────────────────────────────────────── */
+
+/* Ratio bar */
+.ratio-bar-wrap { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.ratio-bar {
+  width: 100%; height: 8px;
+  background: var(--danger-bg);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.ratio-bar-local {
+  height: 100%;
+  background: var(--success);
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+.ratio-label { font-size: 11px; color: var(--text-dim); }
+
+/* Cost chart */
+.cost-chart {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  min-height: 160px;
+}
+.chart-bars {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-around;
+  gap: 12px;
+  height: 140px;
+}
+.chart-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  gap: 4px;
+  height: 100%;
+  justify-content: flex-end;
+}
+.chart-bar {
+  width: 100%;
+  max-width: 60px;
+  border-radius: 4px 4px 0 0;
+  min-height: 2px;
+  transition: height 0.4s ease;
+}
+.chart-value { font-size: 10px; color: var(--text-dim); font-family: var(--mono); }
+.chart-label { font-size: 11px; color: var(--text-label); }
+
+/* Cost table */
+.cost-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.cost-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-label);
+  border-bottom: 1px solid var(--border);
+}
+.cost-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(42,46,58,0.5);
+}
+.cost-table code { font-family: var(--mono); font-size: 12px; }
+.cost-free { color: var(--success); font-weight: 600; }
+.cost-mid { color: var(--warning); }
+.cost-high { color: var(--danger); font-weight: 600; }
+
+/* Routing profile cards */
+.routing-profiles-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.rp-card {
+  background: var(--bg-card);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.rp-card:hover { border-color: var(--accent); background: var(--bg-hover); }
+.rp-card-active { border-color: var(--success); background: var(--success-bg); }
+.rp-card-active:hover { border-color: var(--success); }
+
+.rp-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.rp-card-name { font-size: 15px; font-weight: 600; }
+.rp-card-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--success-bg);
+  color: var(--success);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.rp-card-desc {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+.rp-card-chain {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  line-height: 1.8;
+}
+.rp-card-chain code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--bg-input);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.rp-arrow { color: var(--text-label); margin: 0 2px; }
+.rp-card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+/* Active profile card */
+.active-profile-card {
+  background: var(--bg-card);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.rp-active-inner { position: relative; }
+.rp-active-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 10px;
+  background: var(--success-bg);
+  color: var(--success);
+  text-transform: uppercase;
+}
+.rp-active-name { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+.rp-active-desc { font-size: 13px; color: var(--text-dim); margin-bottom: 12px; }
+.rp-chain {
+  font-size: 13px;
+  line-height: 1.8;
+}
+.rp-chain code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-input);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.text-dim { color: var(--text-dim); }
+
+/* ── Semantic Cache ────────────────────────────────────────────────────────── */
+.cache-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.cache-controls-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.cache-threshold-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+}
+.cache-threshold-label {
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.cache-threshold-row input[type="range"] {
+  flex: 1;
+  max-width: 260px;
+  accent-color: var(--accent);
+}
+.cache-threshold-val {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  min-width: 36px;
+  text-align: center;
+}
+.cache-test-area {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  margin-bottom: 16px;
+}
+.cache-test-area textarea {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 10px;
+  font-size: 13px;
+  font-family: var(--font);
+  resize: vertical;
+}
+.cache-test-area textarea:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+.cache-test-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+.cache-test-result {
+  font-size: 13px;
+  font-family: var(--mono);
+}
+.cache-test-hit { color: var(--success); font-weight: 600; }
+.cache-test-miss { color: var(--text-dim); }
+.cache-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.cache-pagination button {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cache-pagination button:hover { background: var(--bg-hover); border-color: var(--accent); }
+.cache-pagination button:disabled { opacity: 0.4; cursor: default; }
+.cache-pagination span { font-size: 12px; color: var(--text-dim); }
+
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 @media (max-width: 860px) {
   header { flex-wrap: wrap; gap: 8px; padding: 12px 16px; }

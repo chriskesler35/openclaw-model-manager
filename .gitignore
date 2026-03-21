@@ -1,2 +1,4 @@
 node_modules/
 connections.json
+prompt-cache.json
+cache-config.json
