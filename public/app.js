@@ -94,6 +94,7 @@ function switchTab(tabId) {
   if (tabId === 'fallbacks') refreshFallbacks();
   if (tabId === 'local') refreshLocalModels();
   if (tabId === 'connections') renderConnList();
+  if (tabId === 'logs') refreshLogs();
   if (tabId === 'auth') refreshCredentials();
 }
 
@@ -147,7 +148,7 @@ function refreshAll() {
   refreshAuth();
 }
 
-// Full status (for health tab — can take ~6-8s)
+// Full status (for health tab - can take ~6-8s)
 async function fetchGatewayStatusFull() {
   try {
     const res = await capi('GET', '/gateway/status');
@@ -203,7 +204,7 @@ function updateGatewayUI(data) {
     statusText.style.color = 'var(--success)';
 
     const listenerPid = data?.port?.listeners?.[0]?.pid;
-    pid.textContent = data.pid || listenerPid || '—';
+    pid.textContent = data.pid || listenerPid || '-';
 
     const bindHost = data?.gateway?.bindHost || (conn?.type === 'remote' ? conn.host : '127.0.0.1');
     host.textContent = bindHost;
@@ -215,9 +216,9 @@ function updateGatewayUI(data) {
     badgeText.textContent = 'Stopped';
     statusText.textContent = '🔴 Stopped';
     statusText.style.color = 'var(--danger)';
-    pid.textContent = '—';
-    host.textContent = conn?.type === 'remote' ? conn.host : '—';
-    port.textContent = conn?.port || '—';
+    pid.textContent = '-';
+    host.textContent = conn?.type === 'remote' ? conn.host : '-';
+    port.textContent = conn?.port || '-';
   }
 
   byId('btn-start').disabled = running;
@@ -278,7 +279,7 @@ async function refreshHealth() {
       cards.push(healthCard('⚠️', 'Scheduled Task', 'warn', 'Registered but idle',
         `The scheduled task is <strong>registered</strong> but currently <strong>${esc(taskState || taskStatus || 'not running')}</strong>. ` +
         'This means the gateway was started manually (via CLI) rather than through the scheduled task. ' +
-        'Everything works fine — the task is just a safety net for auto-restart.'));
+        'Everything works fine - the task is just a safety net for auto-restart.'));
     } else {
       cards.push(healthCard('ℹ️', 'Scheduled Task', 'warn', 'Not installed',
         'No scheduled task is registered. Your gateway won\'t auto-start on reboot. ' +
@@ -315,7 +316,7 @@ async function refreshHealth() {
     const fbCount = m.fallbacks?.length || 0;
     cards.push(healthCard('🤖', 'Primary Model', 'ok', 'Configured',
       `Active model: <strong>${esc(primary)}</strong>` +
-      (fbCount > 0 ? ` with <strong>${fbCount} fallback${fbCount > 1 ? 's' : ''}</strong> configured.` : '. No fallbacks configured — consider adding some for reliability.')));
+      (fbCount > 0 ? ` with <strong>${fbCount} fallback${fbCount > 1 ? 's' : ''}</strong> configured.` : '. No fallbacks configured - consider adding some for reliability.')));
   }
 
   // 5. Auth Providers
@@ -398,13 +399,99 @@ async function gatewayAction(action) {
       feedback('gateway-feedback', res.message || `${action} completed`, 'success');
     } else {
       toast(`Gateway ${action} failed: ${res.error}`, 'error');
-      feedback('gateway-feedback', res.error + (res.hint ? ` — ${res.hint}` : ''), 'error');
+      feedback('gateway-feedback', res.error + (res.hint ? ` - ${res.hint}` : ''), 'error');
     }
   } catch (e) {
     toast(`Gateway ${action} error: ${e.message}`, 'error');
   }
 
   setTimeout(() => { btn.innerHTML = origText; btn.disabled = false; }, 2500);
+}
+
+// ── Doctor ───────────────────────────────────────────────────────────────────
+
+function escapeHtml(str) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function colorizeDoctorOutput(text) {
+  // Try to parse as JSON first
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return parsed.map(item => {
+        const ok = item.ok !== false;
+        const cls = ok ? 'doctor-ok' : (item.warn ? 'doctor-warn' : 'doctor-err');
+        const icon = ok ? '✅' : (item.warn ? '⚠️' : '❌');
+        const msg = item.message || item.desc || JSON.stringify(item);
+        return `<div class="${cls}">${icon} ${escapeHtml(msg)}</div>`;
+      }).join('\n');
+    }
+  } catch {}
+
+  // Plain text: try to colorize common patterns
+  return escapeHtml(text)
+    .replace(/^(?=.*\[PASS\]|\[OK\]|✓|✅|pass)/gim, '<span class="doctor-ok">$&</span>')
+    .replace(/^(?=.*\[WARN\]|⚠️|warning)/gim, '<span class="doctor-warn">$&</span>')
+    .replace(/^(?=.*\[FAIL\]|✗|❌|error|fail|failed)/gim, '<span class="doctor-err">$&</span>');
+}
+
+function showDoctorOutput(output, title) {
+  const container = byId('doctor-output');
+  const text = byId('doctor-output-text');
+  container.style.display = 'block';
+  text.innerHTML = colorizeDoctorOutput(typeof output === 'string' ? output : JSON.stringify(output, null, 2));
+}
+
+async function runDoctorFix() {
+  const btn = byId('btn-doctor-fix');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Running…';
+
+  try {
+    const res = await capi('POST', '/doctor/fix');
+    if (res.ok) {
+      toast('Doctor --fix completed', 'success');
+      showDoctorOutput(res.output || res.message, 'Doctor --fix Results');
+    } else {
+      toast('Doctor --fix failed: ' + res.error, 'error');
+      showDoctorOutput('Error: ' + (res.error || 'Unknown error') + '\n' + (res.stdout || ''), 'Doctor --fix Error');
+    }
+  } catch (e) {
+    toast('Doctor --fix error: ' + e.message, 'error');
+    showDoctorOutput('Error: ' + e.message, 'Doctor --fix Error');
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '🩺 Run Doctor --fix';
+}
+
+async function runDoctorCheck() {
+  const btn = byId('btn-doctor-check');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Checking…';
+
+  try {
+    const res = await capi('GET', '/doctor/run');
+    if (res.ok) {
+      toast('Doctor check completed', 'success');
+      showDoctorOutput(res.output, 'Doctor Check Results');
+    } else {
+      toast('Doctor check failed: ' + res.error, 'error');
+      showDoctorOutput('Error: ' + (res.error || 'Unknown error') + '\n' + (res.stdout || ''), 'Doctor Check Error');
+    }
+  } catch (e) {
+    toast('Doctor check error: ' + e.message, 'error');
+    showDoctorOutput('Error: ' + e.message, 'Doctor Check Error');
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '🔍 Run Check Only';
 }
 
 // ── Models ───────────────────────────────────────────────────────────────────
@@ -415,12 +502,12 @@ async function refreshModels() {
     if (res.ok && res.data) {
       lastModelsData = res.data;
       const d = res.data;
-      const primary = d.resolvedDefault || d.defaultModel || d.primary || '—';
+      const primary = d.resolvedDefault || d.defaultModel || d.primary || '-';
       const display = byId('primary-model-display');
 
       let metaParts = [];
       const provider = primary.split('/')[0];
-      if (provider && provider !== '—') metaParts.push(`Provider: ${provider}`);
+      if (provider && provider !== '-') metaParts.push(`Provider: ${provider}`);
       if (d.fallbacks?.length) metaParts.push(`${d.fallbacks.length} fallbacks`);
       if (d.imageModel) metaParts.push(`Image: ${d.imageModel}`);
 
@@ -480,7 +567,7 @@ async function refreshModelList() {
     for (const m of models) {
       const key = m.key || m.id || m.model || (typeof m === 'string' ? m : '');
       const name = m.name || '';
-      const ctx = m.contextWindow ? `${(m.contextWindow / 1000).toFixed(0)}k` : '—';
+      const ctx = m.contextWindow ? `${(m.contextWindow / 1000).toFixed(0)}k` : '-';
       const tags = m.tags || [];
 
       const tagHtml = tags.map(t => {
@@ -549,7 +636,7 @@ function renderFallbackTiles() {
   if (!container) return;
 
   if (fallbackList.length === 0) {
-    container.innerHTML = '<div class="empty-state">No fallbacks configured. Add models from the dropdown below — they\'ll be tried in order if the primary fails.</div>';
+    container.innerHTML = '<div class="empty-state">No fallbacks configured. Add models from the dropdown below - they\'ll be tried in order if the primary fails.</div>';
     return;
   }
 
@@ -709,7 +796,7 @@ async function saveFallbacks() {
       fallbackOriginal = [...fallbackList];
       updateFallbackDirty();
       toast('✅ Fallback chain saved! Restart the gateway for changes to take effect.', 'success');
-      feedback('fallback-feedback', '✅ ' + res.message + ' — ' + res.warning, 'success');
+      feedback('fallback-feedback', '✅ ' + res.message + ' - ' + res.warning, 'success');
     } else {
       feedback('fallback-feedback', '❌ ' + (res.error || 'Save failed'), 'error');
     }
@@ -864,7 +951,7 @@ async function refreshAuth() {
 async function refreshCredentials() {
   const container = byId('credential-cards');
   if (!container) return;
-  
+
   try {
     const res = await api('GET', '/api/credentials/status');
     if (!res.ok) {
@@ -880,11 +967,11 @@ async function refreshCredentials() {
       const isLocal = provider === 'ollama';
       const cardClass = isLocal ? 'cred-card-noauth' : hasKey ? 'cred-card-ok' : 'cred-card-missing';
       const icon = isLocal ? '💻' : hasKey ? '✅' : '❌';
-      
+
       let detail = '';
       let hint = '';
       if (isLocal) {
-        detail = 'No credentials needed — runs locally';
+        detail = 'No credentials needed - runs locally';
       } else if (hasKey) {
         detail = `${info.profiles?.length || 0} profile(s) configured`;
         // Show masked key hints
@@ -893,7 +980,7 @@ async function refreshCredentials() {
           hint = withKeys.map(p => `${p.profileId}: ${p.keyHint}`).join(', ');
         }
       } else {
-        detail = 'No API key configured — click below to add one';
+        detail = 'No API key configured - click below to add one';
       }
 
       const actionHtml = !isLocal && !hasKey
@@ -934,7 +1021,7 @@ function onCredProviderChange() {
   const label = byId('cred-key-label');
   const hint = byId('cred-key-hint');
   const input = byId('cred-key');
-  
+
   const PROVIDERS = {
     anthropic: { label: 'Setup Token', hint: 'Starts with sk-ant-...', placeholder: 'sk-ant-...' },
     openrouter: { label: 'API Key', hint: 'Starts with sk-or-v1-...', placeholder: 'sk-or-v1-...' },
@@ -980,10 +1067,10 @@ async function saveCredential() {
       feedback('cred-feedback', `✅ ${res.message}`, 'success');
       byId('cred-key').value = '';
       byId('cred-profile-id').value = '';
-      
+
       // Show restart warning toast
       toast('⚠️ Gateway may need restart for new credentials to take effect. Wait for active tasks to finish first.', 'warning');
-      
+
       // Refresh credential status
       refreshCredentials();
       refreshAuth();
@@ -1147,7 +1234,7 @@ async function runProbe() {
 
       const summaryClass = failCount === 0 ? 'health-ok' : okCount === 0 ? 'health-err' : 'health-warn';
       html += `<div class="probe-summary ${summaryClass}">
-        Probed <strong>${results.length} provider${results.length !== 1 ? 's' : ''}</strong> in ${durationSec}s —
+        Probed <strong>${results.length} provider${results.length !== 1 ? 's' : ''}</strong> in ${durationSec}s -
         <strong>${okCount} healthy</strong>${failCount > 0 ? `, <strong>${failCount} with issues</strong>` : ''}
       </div>`;
     }
@@ -1193,7 +1280,7 @@ async function runProbe() {
           const secs = r.latencyMs / 1000;
           const latClass = secs < 3 ? 'temp-cool' : secs < 10 ? 'temp-warm' : 'temp-hot';
           const latLabel = secs < 3 ? 'Fast' : secs < 10 ? 'Moderate' : 'Slow';
-          latencyBadge = `<span class="live-stat-temp ${latClass}">${latLabel} — ${secs.toFixed(1)}s</span>`;
+          latencyBadge = `<span class="live-stat-temp ${latClass}">${latLabel} - ${secs.toFixed(1)}s</span>`;
         }
 
         // Unique ID for expandable JSON
@@ -1488,13 +1575,13 @@ async function testRemoteConnectivity() {
     let summaryClass, summaryText;
     if (okCount === totalCount) {
       summaryClass = 'rt-summary-ok';
-      summaryText = `✅ All ${totalCount} services reachable — full remote management available`;
+      summaryText = `✅ All ${totalCount} services reachable - full remote management available`;
     } else if (okCount > 0) {
       summaryClass = 'rt-summary-partial';
-      summaryText = `⚠️ ${okCount} of ${totalCount} services reachable — some features will be limited`;
+      summaryText = `⚠️ ${okCount} of ${totalCount} services reachable - some features will be limited`;
     } else {
       summaryClass = 'rt-summary-fail';
-      summaryText = `❌ No remote services reachable — check network, firewall, and service status`;
+      summaryText = `❌ No remote services reachable - check network, firewall, and service status`;
     }
 
     let html = `<div class="rt-summary ${summaryClass}">${summaryText} <span style="margin-left:auto;font-size:11px;opacity:0.7">${timeMs}ms</span></div>`;
@@ -1531,7 +1618,7 @@ async function testRemoteConnectivity() {
       html += `<div class="rt-card ${cardClass}">
         <span class="rt-icon">${t.icon}</span>
         <div class="rt-body">
-          <div class="rt-title">${statusIcon} ${esc(t.label)} — ${statusText}</div>
+          <div class="rt-title">${statusIcon} ${esc(t.label)} - ${statusText}</div>
           ${d.url ? `<div class="rt-url">${esc(d.url)}</div>` : ''}
           <div class="rt-hint" style="white-space:pre-line">${esc(d.hint || '')}</div>
           ${extraHtml}
@@ -1672,7 +1759,7 @@ async function refreshProviderStatus() {
       </div>
     </div>`;
 
-    // Fallback rows — show unique providers with their best available model
+    // Fallback rows - show unique providers with their best available model
     const shownProviders = new Set([primaryProv]);
     for (const fb of fallbacks) {
       const prov = fb.split('/')[0];
@@ -1687,7 +1774,7 @@ async function refreshProviderStatus() {
       if (inCooldown) {
         detailText = `<span class="cooldown-timer">⏳ ${formatCooldown(status.cooldownSeconds || status.disabledSeconds)}</span> • ${status.errorCount} error${status.errorCount !== 1 ? 's' : ''}`;
       } else {
-        detailText = 'Ready — available as fallback';
+        detailText = 'Ready - available as fallback';
       }
 
       html += `<div class="provider-row ${inCooldown ? 'in-cooldown' : ''}">
@@ -1737,12 +1824,12 @@ function formatCooldown(seconds) {
 }
 
 async function failoverTo(model) {
-  if (!confirm(`Switch primary model to ${model}?\n\nThis takes effect immediately — no gateway restart needed.`)) return;
+  if (!confirm(`Switch primary model to ${model}?\n\nThis takes effect immediately - no gateway restart needed.`)) return;
 
   try {
     const res = await capi('POST', '/failover', { model });
     if (res.ok) {
-      toast(`⚡ Switched to ${model} — ${res.note}`, 'success');
+      toast(`⚡ Switched to ${model} - ${res.note}`, 'success');
       refreshProviderStatus();
       refreshModels();
     } else {
@@ -1862,7 +1949,7 @@ async function refreshSystemStats() {
 
         if (isCpuOnly) {
           statusIcon = '🐌';
-          statusText = 'CPU Only — No GPU acceleration';
+          statusText = 'CPU Only - No GPU acceleration';
           statusClass = 'temp-hot';
           barHtml = `
             <div class="live-bar-container">
@@ -1871,7 +1958,7 @@ async function refreshSystemStats() {
             </div>`;
         } else if (isOffloaded) {
           statusIcon = '⚠️';
-          statusText = `Offloaded — ${rm.gpuPct}% GPU / ${rm.cpuPct}% CPU`;
+          statusText = `Offloaded - ${rm.gpuPct}% GPU / ${rm.cpuPct}% CPU`;
           statusClass = 'temp-warm';
           barHtml = `
             <div class="live-bar-container" style="display:flex">
@@ -1922,7 +2009,7 @@ async function refreshSystemStats() {
       container.innerHTML = '<div class="empty-state">System stats unavailable for remote connection</div>';
     }
   } catch (e) {
-    // Don't overwrite on transient errors — keep last good state
+    // Don't overwrite on transient errors - keep last good state
   }
 }
 
@@ -2025,7 +2112,7 @@ async function refreshLocalModels() {
 
     let hintHtml = '';
     if (modelsRes.source === 'remote-ollama') {
-      hintHtml = `<div class="remote-hint">📡 Models retrieved from remote Ollama. System specs unavailable — run the Model Manager on the remote host for full compatibility analysis.</div>`;
+      hintHtml = `<div class="remote-hint">📡 Models retrieved from remote Ollama. System specs unavailable - run the Model Manager on the remote host for full compatibility analysis.</div>`;
     } else if (modelsRes.source === 'remote-model-manager') {
       hintHtml = `<div class="remote-hint">📡 Full compatibility analysis from remote Model Manager</div>`;
     }
@@ -2104,5 +2191,157 @@ function autoAddDiscovered(name, host, port) {
   byId('conn-host').value = host;
   byId('conn-port').value = port;
   byId('conn-name').scrollIntoView({ behavior: 'smooth' });
-  toast('Prefilled — add a token if needed, then click Add Connection', 'info');
+  toast('Prefilled - add a token if needed, then click Add Connection', 'info');
+}
+
+// ── Logs ─────────────────────────────────────────────────────────────────────
+
+let logAutoRefreshInterval = null;
+let lastLogSource = 'gateway';
+let lastLogLevel = 'all';
+let lastLogLimit = '100';
+
+function escapeHtml(str) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatTimestamp(ts) {
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts);
+    return d.toLocaleTimeString('en-US', {
+      hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  } catch {
+    return ts.substring(ts.indexOf('T') + 1, ts.indexOf('.'));
+  }
+}
+
+function levelBadge(level) {
+  const cls = level === 'error' ? 'log-level-error'
+    : level === 'warn' ? 'log-level-warn'
+    : level === 'debug' ? 'log-level-debug'
+    : 'log-level-info';
+  return `<span class="log-level-badge ${cls}">${(level || 'info').toUpperCase()}</span>`;
+}
+
+function renderLogLine(entry) {
+  const { raw, obj } = entry;
+
+  if (!obj) {
+    // Plain text line
+    return `<div class="log-line"><span class="log-ts"></span><span class="log-msg">${escapeHtml(raw)}</span></div>`;
+  }
+
+  const ts = formatTimestamp(obj.ts);
+  const level = obj.level || 'info';
+  const msg = escapeHtml(obj.message || '');
+  const details = obj.details ? escapeHtml(typeof obj.details === 'string' ? obj.details : JSON.stringify(obj.details)) : '';
+
+  const msgClass = level === 'error' ? 'log-msg-error' : level === 'warn' ? 'log-msg-warn' : '';
+
+  return `<div class="log-line">
+    <span class="log-ts">${escapeHtml(ts)}</span>
+    ${levelBadge(level)}
+    <div>
+      <span class="log-msg ${msgClass}">${msg}</span>
+      ${details ? `<div class="log-details">${details}</div>` : ''}
+    </div>
+  </div>`;
+}
+
+async function refreshLogs() {
+  const source = byId('log-source')?.value || 'gateway';
+  const level = byId('log-level')?.value || 'all';
+  const limit = byId('log-limit')?.value || '100';
+  const container = byId('log-output');
+  const statusEl = byId('log-status');
+
+  lastLogSource = source;
+  lastLogLevel = level;
+  lastLogLimit = limit;
+
+  if (statusEl) {
+    statusEl.innerHTML = '<span class="log-dot log-dot-unknown"></span> Loading…';
+  }
+  if (container) {
+    container.innerHTML = '<div class="log-empty"><span class="spinner"></span> Loading logs…</div>';
+  }
+
+  try {
+    const url = `/api/logs?source=${encodeURIComponent(source)}&level=${encodeURIComponent(level)}&limit=${encodeURIComponent(limit)}`;
+    const res = await api('GET', url);
+
+    if (!res.ok) {
+      if (container) container.innerHTML = `<div class="log-empty" style="color:var(--danger)">Error: ${escapeHtml(res.error)}</div>`;
+      if (statusEl) statusEl.innerHTML = '<span class="log-dot log-dot-error"></span> Error loading logs';
+      return;
+    }
+
+    const { entries, logDir, hasEntries, latestLevel } = res;
+
+    // Status indicator
+    if (statusEl) {
+      let dotClass = 'log-dot-unknown';
+      if (hasEntries) {
+        dotClass = latestLevel === 'error' ? 'log-dot-error'
+          : latestLevel === 'warn' ? 'log-dot-warn'
+          : 'log-dot-ok';
+      }
+      const hint = logDir ? `<span style="color:var(--text-dim);font-size:10px;margin-left:4px">${escapeHtml(logDir.replace(/\\/g, '/').split('/').slice(-2).join('/'))}</span>` : '';
+      statusEl.innerHTML = `<span class="log-dot ${dotClass}"></span> ${entries.length} entries${hint}`;
+    }
+
+    if (!entries || entries.length === 0) {
+      const note = level !== 'all'
+        ? `<div class="log-filter-note">Showing "${level}+" only. <a href="#" onclick="document.getElementById('log-level').value='all';refreshLogs();return false" style="color:var(--accent)">Show all levels</a></div>`
+        : '';
+      if (container) container.innerHTML = `<div class="log-empty">${res.hint || 'No log entries found.'}${note}</div>`;
+      return;
+    }
+
+    if (container) {
+      container.innerHTML = entries.map(renderLogLine).join('');
+      // Scroll to top of log output (most recent entries)
+      container.scrollTop = 0;
+    }
+  } catch (e) {
+    if (container) container.innerHTML = `<div class="log-empty" style="color:var(--danger)">Error: ${escapeHtml(e.message)}</div>`;
+    if (statusEl) statusEl.innerHTML = '<span class="log-dot log-dot-error"></span> Error loading logs';
+  }
+}
+
+function toggleLogAutoRefresh() {
+  const enabled = byId('log-auto-refresh')?.checked;
+
+  if (logAutoRefreshInterval) {
+    clearInterval(logAutoRefreshInterval);
+    logAutoRefreshInterval = null;
+  }
+
+  if (enabled) {
+    logAutoRefreshInterval = setInterval(() => {
+      // Only refresh if the logs tab is currently visible
+      if (document.querySelector('.tab[data-tab="logs"]')?.classList.contains('active')) {
+        refreshLogs();
+      } else {
+        // Tab is not active, stop auto-refresh
+        if (logAutoRefreshInterval) {
+          clearInterval(logAutoRefreshInterval);
+          logAutoRefreshInterval = null;
+        }
+        if (byId('log-auto-refresh')) byId('log-auto-refresh').checked = false;
+      }
+    }, 5000);
+  }
+}
+
+function clearLogDisplay() {
+  const container = byId('log-output');
+  if (container) container.innerHTML = '<div class="log-empty">Display cleared. Click Refresh to reload logs.</div>';
 }

@@ -55,6 +55,9 @@
       <button class="tab" data-tab="connections" onclick="switchTab('connections')">
         <span class="tab-icon">🌐</span> Connections
       </button>
+      <button class="tab" data-tab="logs" onclick="switchTab('logs')">
+        <span class="tab-icon">📋</span> Logs
+      </button>
     </nav>
 
     <!-- Tab Panels -->
@@ -118,6 +121,29 @@
             </button>
           </div>
           <div id="gateway-feedback" class="feedback"></div>
+
+          <!-- Doctor --fix -->
+          <div style="margin-top:28px; padding-top:20px; border-top: 1px solid var(--border);">
+            <h3 style="margin-bottom:8px">🩺 OpenClaw Doctor</h3>
+            <p class="panel-desc" style="margin-bottom:14px">Run diagnostic checks and apply automatic fixes to your OpenClaw installation.</p>
+            <div class="gateway-warning" style="margin-bottom:14px">
+              <span class="warning-icon">⚠️</span>
+              <div>
+                <strong>Running "Doctor --fix" will restart the OpenClaw Gateway.</strong> Active conversations will be interrupted. If the gateway is currently handling a task, <strong>wait until it finishes</strong> before running this.
+              </div>
+            </div>
+            <div class="button-group">
+              <button class="btn btn-primary" onclick="runDoctorFix()" id="btn-doctor-fix">
+                🩺 Run Doctor --fix
+              </button>
+              <button class="btn" onclick="runDoctorCheck()" id="btn-doctor-check">
+                🔍 Run Check Only
+              </button>
+            </div>
+            <div id="doctor-output" class="doctor-output" style="margin-top:14px; display:none">
+              <pre id="doctor-output-text"></pre>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -484,6 +510,49 @@ netsh advfirewall firewall add rule name="OpenClaw Gateway" dir=in action=allow 
           <div id="discover-results" style="display:none;margin-top:24px">
             <h3>📡 Discovered Gateways</h3>
             <div id="discover-list" class="conn-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- LOGS TAB -->
+      <section class="tab-panel" id="panel-logs">
+        <div class="panel-header">
+          <h2>Gateway Logs</h2>
+          <div class="header-controls">
+            <select id="log-source" onchange="refreshLogs()" style="margin-right:8px">
+              <option value="gateway">Gateway Logs</option>
+              <option value="model-manager">Model Manager Logs</option>
+            </select>
+            <select id="log-level" onchange="refreshLogs()" style="margin-right:8px">
+              <option value="all">All levels</option>
+              <option value="info">Info +</option>
+              <option value="warn">Warnings +</option>
+              <option value="error">Errors only</option>
+            </select>
+            <select id="log-limit" onchange="refreshLogs()" style="margin-right:8px">
+              <option value="50">Last 50 lines</option>
+              <option value="100" selected>Last 100 lines</option>
+              <option value="250">Last 250 lines</option>
+              <option value="500">Last 500 lines</option>
+            </select>
+            <button class="btn btn-sm" onclick="refreshLogs()">↻ Refresh</button>
+            <button class="btn btn-sm" onclick="clearLogDisplay()" style="margin-left:4px">Clear Display</button>
+          </div>
+        </div>
+        <div class="panel-content">
+          <div class="log-toolbar">
+            <div id="log-status" class="log-status">
+              <span class="log-dot log-dot-unknown"></span> Loading…
+            </div>
+            <div class="log-auto-wrap">
+              <label class="toggle-label" style="font-size:12px">
+                <input type="checkbox" id="log-auto-refresh" onchange="toggleLogAutoRefresh()">
+                Auto-refresh (5s)
+              </label>
+            </div>
+          </div>
+          <div id="log-output" class="log-output" style="margin-top:8px">
+            <div class="empty-state">Loading logs…</div>
           </div>
         </div>
       </section>

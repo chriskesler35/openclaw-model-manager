@@ -303,6 +303,53 @@ app.get('/api/connections/:id/health', async (req, res) => {
   }
 });
 
+// ── Doctor --fix (connection-aware) ─────────────────────────────────────────
+
+app.post('/api/:connId/doctor/fix', async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+
+  if (conn.type === 'local') {
+    try {
+      const out = await run('openclaw doctor --fix', 120000);
+      res.json({ ok: true, output: out, message: 'Doctor --fix completed. Review the output below for results.' });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message, stdout: e.stdout });
+    }
+  } else {
+    // Remote: try CLI with remote flags
+    try {
+      const out = await run(`openclaw doctor --fix${remoteFlags(conn)}`, 120000);
+      res.json({ ok: true, output: out, message: 'Doctor --fix completed on remote host.' });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message, stdout: e.stdout });
+    }
+  }
+});
+
+app.get('/api/:connId/doctor/run', async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+
+  if (conn.type === 'local') {
+    try {
+      const out = await run('openclaw doctor --json', 60000);
+      const parsed = tryJsonParse(out);
+      res.json({ ok: true, output: parsed || out });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message, stdout: e.stdout });
+    }
+  } else {
+    try {
+      const out = await run(`openclaw doctor --json${remoteFlags(conn)}`, 60000);
+      const parsed = tryJsonParse(out);
+      res.json({ ok: true, output: parsed || out });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message, stdout: e.stdout });
+    }
+  }
+});
+
 // ── Gateway Control (connection-aware) ───────────────────────────────────────
 
 app.get('/api/:connId/gateway/status', async (req, res) => {
@@ -1772,6 +1819,122 @@ app.get('/api/discover', async (req, res) => {
     res.json({ ok: true, data: parsed || raw });
   } catch (e) {
     res.json({ ok: true, data: { beacons: [], error: e.message } });
+  }
+});
+
+// ── Logs ────────────────────────────────────────────────────────────────────
+
+const MM_LOG_DIR = path.join(__dirname, 'logs');
+
+app.get('/api/logs', async (req, res) => {
+  const source = req.query.source || 'gateway';
+  const level = req.query.level || 'all';
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+
+  const logDir = source === 'model-manager'
+    ? MM_LOG_DIR
+    : path.join(process.env.USERPROFILE || process.env.HOME || '', '.openclaw', 'logs');
+
+  const entries = [];
+
+  try {
+    if (!fs.existsSync(logDir)) {
+      return res.json({ ok: true, entries: [], source, logDir, hint: 'Log directory does not exist yet.' });
+    }
+
+    const files = fs.readdirSync(logDir)
+      .filter(f => f.endsWith('.log'))
+      .sort((a, b) => b.localeCompare(a)); // newest first
+
+    // Read from newest file(s) until we have enough entries
+    for (const file of files) {
+      if (entries.length >= limit) break;
+      const filePath = path.join(logDir, file);
+      const stat = fs.statSync(filePath);
+      // Skip very large files that take too long
+      if (stat.size > 5 * 1024 * 1024) {
+        // Read only last 200KB
+        const fd = fs.openSync(filePath, 'r');
+        const buf = Buffer.alloc(200 * 1024);
+        const fdStat = fs.fstatSync(fd);
+        const start = Math.max(0, fdStat.size - 200 * 1024);
+        fs.readSync(fd, buf, 0, buf.length, start);
+        fs.closeSync(fd);
+        const chunk = buf.toString('utf8').split('\n').filter(Boolean);
+        entries.push(...chunk.slice(-limit));
+      } else {
+        const content = fs.readFileSync(filePath, 'utf8');
+        const lines = content.split('\n').filter(Boolean);
+        entries.push(...lines);
+      }
+    }
+
+    // Sort all entries by timestamp descending, take limit
+    const parsed = entries
+      .map(line => {
+        try {
+          return { raw: line, obj: JSON.parse(line) };
+        } catch {
+          return { raw: line, obj: null };
+        }
+      })
+      .filter(e => {
+        if (!e.obj) return level === 'all';
+        if (level === 'error') return e.obj.level === 'error';
+        if (level === 'warn') return e.obj.level === 'warn' || e.obj.level === 'error';
+        if (level === 'info') return e.obj.level !== 'debug';
+        return true;
+      })
+      .sort((a, b) => {
+        const ta = a.obj?.ts || '';
+        const tb = b.obj?.ts || '';
+        return tb.localeCompare(ta); // newest first
+      })
+      .slice(0, limit);
+
+    const hasEntries = parsed.length > 0;
+    const latestLevel = parsed[0]?.obj?.level || null;
+
+    res.json({
+      ok: true,
+      entries: parsed,
+      source,
+      logDir,
+      total: parsed.length,
+      hasEntries,
+      latestLevel,
+      level,
+      limit,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message, source });
+  }
+});
+
+app.get('/api/logs/files', async (req, res) => {
+  const source = req.query.source || 'gateway';
+
+  const logDir = source === 'model-manager'
+    ? MM_LOG_DIR
+    : path.join(process.env.USERPROFILE || process.env.HOME || '', '.openclaw', 'logs');
+
+  try {
+    if (!fs.existsSync(logDir)) {
+      return res.json({ ok: true, files: [], logDir });
+    }
+
+    const files = fs.readdirSync(logDir)
+      .filter(f => f.endsWith('.log'))
+      .sort((a, b) => b.localeCompare(a))
+      .map(f => {
+        const fp = path.join(logDir, f);
+        const stat = fs.statSync(fp);
+        return { name: f, size: stat.size, modified: stat.mtime };
+      });
+
+    res.json({ ok: true, files, logDir });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
