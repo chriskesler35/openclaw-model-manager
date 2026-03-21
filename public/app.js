@@ -275,6 +275,7 @@ function renderConnectionSelect() {
 
 function switchConnection() {
   activeConnId = byId('conn-select').value;
+  localModelsLoaded = false;
   updateConnTypeBadge();
   refreshAll();
 
@@ -745,6 +746,55 @@ async function runDoctorCheck() {
 
   btn.disabled = false;
   btn.innerHTML = '🔍 Run Check Only';
+// ── Manager Self-Restart ─────────────────────────────────────────────────────
+
+async function restartManager() {
+  if (!confirm('Restart the Model Manager server? The page will reconnect automatically.')) return;
+
+  const btn = byId('btn-restart-mm');
+  const origText = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+
+  // Show a persistent overlay so the user knows what's happening
+  let overlay = document.getElementById('mm-restart-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'mm-restart-overlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999;';
+    overlay.innerHTML = '<div style="text-align:center;color:#fff;font-size:16px"><div class="spinner" style="margin:0 auto 16px;width:32px;height:32px"></div><div id="mm-restart-msg">Restarting Model Manager…</div></div>';
+    document.body.appendChild(overlay);
+  }
+
+  const msg = document.getElementById('mm-restart-msg');
+
+  try {
+    await fetch('/api/manager/restart', { method: 'POST' });
+  } catch {}
+
+  // Poll until server comes back
+  msg.textContent = 'Waiting for server to come back…';
+  let online = false;
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const r = await fetch('/api/manager/health', { signal: AbortSignal.timeout(2000) });
+      if (r.ok) { online = true; break; }
+    } catch {}
+    msg.textContent = `Waiting for server to come back… (${i + 1}s)`;
+  }
+
+  overlay.remove();
+  btn.innerHTML = origText;
+  btn.disabled = false;
+
+  if (online) {
+    toast('Model Manager restarted successfully', 'success');
+    localModelsLoaded = false;
+    refreshAll();
+  } else {
+    toast('Server did not come back within 30s — try refreshing the page', 'error');
+  }
 }
 
 // ── Models ───────────────────────────────────────────────────────────────────
@@ -2348,7 +2398,10 @@ async function refreshSystemStats() {
 
 // ── Local Models & System Info ────────────────────────────────────────────────
 
-async function refreshLocalModels() {
+let localModelsLoaded = false;
+
+async function refreshLocalModels(force = false) {
+  if (localModelsLoaded && !force) return;
   const specsContainer = byId('system-specs');
   const listContainer = byId('local-model-list');
 
@@ -2510,6 +2563,9 @@ async function refreshLocalModels() {
             ${esc(m.recommendation)}
             ${vramBarHtml}
           </div>
+          <div class="lm-actions">
+            <button class="btn btn-sm btn-danger" onclick="deleteLocalModel('${esc(m.name.replace(/'/g, "\\'"))}')" title="Delete this model from Ollama">🗑 Delete</button>
+          </div>
         </div>
       </div>`;
     }).join('');
@@ -2517,6 +2573,8 @@ async function refreshLocalModels() {
     const hint = modelsRes?.hint || modelsRes?.error || 'Could not load local models. Is Ollama running?';
     listContainer.innerHTML = `<div class="empty-state">${esc(hint)}</div>`;
   }
+
+  localModelsLoaded = true;
 }
 
 function autoAddDiscovered(name, host, port) {
@@ -3133,4 +3191,201 @@ async function testCachePrompt() {
 
   // Refresh stats since test may have updated hit counts
   refreshCacheStats();
+}
+
+
+
+// ── Ollama Pull / Copy / Delete ───────────────────────────────────────────────
+
+let activePullId = null;
+
+function togglePullHelp() {
+  const el = byId('pull-help-text');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function setPullButtons(state) {
+  const startBtn = byId('btn-start-pull');
+  const cancelBtn = byId('btn-cancel-pull');
+  const input = byId('pull-model-input');
+  if (state === 'pulling') {
+    startBtn.style.display = 'none';
+    cancelBtn.style.display = '';
+    input.disabled = true;
+  } else {
+    startBtn.style.display = '';
+    cancelBtn.style.display = 'none';
+    input.disabled = false;
+  }
+}
+
+function startPull() {
+  const model = byId('pull-model-input').value.trim();
+  if (!model) { toast('Enter a model name to pull', 'warning'); return; }
+
+  const statusEl = byId('pull-status');
+  const logEl = byId('pull-log');
+
+  statusEl.style.display = '';
+  logEl.style.display = '';
+  logEl.innerHTML = '';
+  statusEl.className = 'pull-status pulling';
+  statusEl.innerHTML = '<span class="spinner"></span> Starting pull: <strong>' + esc(model) + '</strong>…';
+
+  setPullButtons('pulling');
+
+  const proto = location.protocol === 'https:' ? 'https:' : 'http:';
+  const host = location.host;
+  const url = proto + '//' + host + '/api/' + activeConnId + '/ollama/pull';
+
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model }),
+  }).then(r => {
+    if (!r.ok) {
+      statusEl.className = 'pull-status error';
+      statusEl.innerHTML = '❌ Pull failed: HTTP ' + r.status;
+      setPullButtons('idle');
+      return;
+    }
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    function appendLog(html) {
+      logEl.insertAdjacentHTML('beforeend', html);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function read() {
+      reader.read().then(({ done, value }) => {
+        if (done) return;
+        const text = decoder.decode(value, { stream: true });
+        const parts = (buffer + text).split('\n');
+        buffer = parts.pop() || '';
+
+        for (const part of parts) {
+          if (!part.trim()) continue;
+          const eventMatch = part.match(/^event: (.+)/);
+          const dataMatch = part.match(/^data: (.+)/);
+          if (!eventMatch || !dataMatch) continue;
+
+          const eventName = eventMatch[1];
+          let data;
+          try { data = JSON.parse(dataMatch[1]); } catch { continue; }
+
+          if (eventName === 'started') {
+            activePullId = data.pullId;
+          } else if (eventName === 'progress') {
+            const total = data.total ? formatBytes(data.total) : '?';
+            const done = data.completed ? formatBytes(data.completed) : '?';
+            const pct = data.total && data.completed ? Math.round((data.completed / data.total) * 100) : 0;
+            statusEl.className = 'pull-status pulling';
+            statusEl.innerHTML =
+              '<strong>' + esc(data.digest || model) + '</strong> — ' + done + ' / ' + total +
+              (pct > 0 ? '<div class="pull-progress-bar"><div class="pull-progress-fill" style="width:' + pct + '%"></div></div>' : '') +
+              (data.status ? '<div style="font-size:11px;color:var(--text-label);margin-top:2px">' + esc(data.status) + '</div>' : '');
+            appendLog('<div class="pull-log-line">[progress] ' + esc(data.digest || '') + ' — ' + done + ' / ' + total + '</div>');
+          } else if (eventName === 'stdout') {
+            const line = typeof data.line === 'string' ? data.line : JSON.stringify(data.line || '');
+            if (line.trim()) appendLog('<div class="pull-log-line">' + esc(line) + '</div>');
+          } else if (eventName === 'stderr') {
+            const line = typeof data.line === 'string' ? data.line : JSON.stringify(data.line || '');
+            if (line.trim()) appendLog('<div class="pull-log-line pull-log-stderr">' + esc(line) + '</div>');
+          } else if (eventName === 'done') {
+            const isError = data.status === 'error';
+            const isCancelled = data.status === 'cancelled';
+            statusEl.className = 'pull-status ' + (isError ? 'error' : isCancelled ? 'cancelled' : 'done');
+            statusEl.innerHTML = isError
+              ? '❌ Error: ' + esc(data.message || data.status)
+              : isCancelled
+              ? '⚠️ Cancelled: ' + esc(data.message)
+              : '✅ Done: ' + esc(data.message || 'Pull complete');
+            appendLog('<div class="pull-log-line pull-log-done">[done] ' + esc(data.message || '') + '</div>');
+            setPullButtons('idle');
+            activePullId = null;
+            setTimeout(refreshLocalModels, 2000);
+          }
+        }
+        read();
+      });
+    }
+    read();
+  }).catch(e => {
+    statusEl.className = 'pull-status error';
+    statusEl.innerHTML = '❌ Connection error: ' + esc(e.message);
+    setPullButtons('idle');
+  });
+}
+
+function cancelPull() {
+  if (!activePullId) { toast('No active pull to cancel', 'warning'); return; }
+  const pullId = activePullId;
+  api('POST', '/api/' + activeConnId + '/ollama/pull/' + pullId + '/cancel').then(res => {
+    if (res.ok) toast('Pull cancelled', 'info');
+    else toast('Cancel failed: ' + res.error, 'error');
+  });
+  setPullButtons('idle');
+  activePullId = null;
+}
+
+async function copyModel() {
+  const source = byId('copy-source').value.trim();
+  const target = byId('copy-target').value.trim();
+  const feedbackEl = byId('copy-feedback');
+  if (!source || !target) {
+    feedbackEl.textContent = 'Enter both source and target model names';
+    feedbackEl.className = 'feedback error';
+    return;
+  }
+  feedbackEl.textContent = 'Copying…';
+  feedbackEl.className = 'feedback info';
+  try {
+    const res = await api('POST', '/api/' + activeConnId + '/ollama/copy', { source, target });
+    if (res.ok) {
+      feedbackEl.textContent = '✅ ' + res.message;
+      feedbackEl.className = 'feedback success';
+      byId('copy-source').value = '';
+      byId('copy-target').value = '';
+      setTimeout(() => { feedbackEl.textContent = ''; feedbackEl.className = 'feedback'; }, 5000);
+      setTimeout(refreshLocalModels, 1000);
+    } else {
+      feedbackEl.textContent = '❌ ' + res.error;
+      feedbackEl.className = 'feedback error';
+    }
+  } catch (e) {
+    feedbackEl.textContent = '❌ ' + e.message;
+    feedbackEl.className = 'feedback error';
+  }
+}
+
+async function deleteLocalModel(modelName) {
+  if (!confirm('Delete model "' + modelName + '"?\n\nThis removes the model files from disk and cannot be undone.')) return;
+  const feedbackEl = byId('copy-feedback');
+  feedbackEl.textContent = 'Deleting "' + modelName + '"…';
+  feedbackEl.className = 'feedback info';
+  try {
+    const res = await api('DELETE', '/api/' + activeConnId + '/ollama/models/' + encodeURIComponent(modelName));
+    if (res.ok) {
+      feedbackEl.textContent = '✅ ' + res.message;
+      feedbackEl.className = 'feedback success';
+      setTimeout(refreshLocalModels, 1000);
+    } else {
+      feedbackEl.textContent = '❌ ' + res.error;
+      feedbackEl.className = 'feedback error';
+    }
+  } catch (e) {
+    feedbackEl.textContent = '❌ ' + e.message;
+    feedbackEl.className = 'feedback error';
+  }
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }

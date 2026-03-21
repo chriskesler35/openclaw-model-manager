@@ -26,6 +26,7 @@
           <span class="dot"></span>
           <span class="badge-text">Checking…</span>
         </span>
+        <button class="btn btn-sm" onclick="restartManager()" id="btn-restart-mm" title="Restart the Model Manager server">↻ MM</button>
       </div>
     </header>
 
@@ -312,6 +313,9 @@
             <button class="btn btn-warning btn-lg" onclick="gatewayAction('restart')" id="btn-restart">
               ↻ Restart
             </button>
+            <button class="btn btn-info btn-lg" onclick="doctorFix()" id="btn-doctor" title="Run openclaw doctor --fix to diagnose and repair gateway issues">
+              🩺 Doctor Fix
+            </button>
           </div>
           <div id="gateway-feedback" class="feedback"></div>
 
@@ -579,9 +583,38 @@
       <section class="tab-panel" id="panel-local">
         <div class="panel-header">
           <h2>Local Models</h2>
-          <button class="btn btn-sm" onclick="refreshLocalModels()">↻ Refresh</button>
+          <button class="btn btn-sm" onclick="refreshLocalModels(true)">↻ Refresh</button>
         </div>
         <div class="panel-content">
+          <!-- Pull Model Panel -->
+          <div class="pull-panel" id="pull-panel" style="margin-bottom:24px">
+            <div class="pull-panel-header">
+              <h3>⬇️ Pull Model</h3>
+              <button class="btn btn-sm" id="btn-pull-help" onclick="togglePullHelp()">? Help</button>
+            </div>
+            <div id="pull-help-text" class="pull-help-text" style="display:none">
+              <p><strong>To pull a model remotely:</strong> Your remote connection must have Ollama installed and running, with its port (11434) accessible in the firewall.</p>
+              <p><strong>Model names:</strong> Use the full tag like <code>llama3:8b</code>, <code>mistral:7b</code>, <code>qwen2.5-coder:14b</code>. For quantized models: <code>llama3:8b-instruct-q4_K_M</code>.</p>
+              <p>Large models (7B+ quantizations) can take <strong>10-30 minutes</strong> to download depending on your connection speed.</p>
+            </div>
+            <div class="pull-form-row">
+              <input type="text" id="pull-model-input" placeholder="e.g. llama3:8b or qwen2.5-coder:14b-instruct-q4_K_M" autocomplete="off">
+              <button class="btn btn-primary" id="btn-start-pull" onclick="startPull()">⬇ Pull</button>
+              <button class="btn btn-danger" id="btn-cancel-pull" onclick="cancelPull()" style="display:none">✕ Cancel</button>
+            </div>
+            <!-- Pull progress -->
+            <div id="pull-status" class="pull-status" style="display:none"></div>
+            <div id="pull-log" class="pull-log" style="display:none"></div>
+            <!-- Copy model -->
+            <div class="pull-form-row" style="margin-top:8px">
+              <input type="text" id="copy-source" placeholder="Source model name" style="flex:1" autocomplete="off">
+              <span style="padding:0 6px;color:var(--text-label);line-height:2">→</span>
+              <input type="text" id="copy-target" placeholder="New model name" style="flex:1" autocomplete="off">
+              <button class="btn btn-sm" onclick="copyModel()">📋 Copy / Duplicate</button>
+            </div>
+            <div id="copy-feedback" class="feedback" style="margin-top:4px"></div>
+          </div>
+
           <!-- System Specs -->
           <div id="system-specs" class="stats-grid" style="margin-bottom:20px">
             <div class="empty-state">Loading system info…</div>

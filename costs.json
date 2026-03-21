@@ -7,6 +7,14 @@
       "totalCloudTokens": 0,
       "savedByCost": 0,
       "updatedAt": "2026-03-14T20:50:01.721Z"
+    },
+    "2026-03-21": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-03-21T16:33:22.875Z"
     }
   }
 }

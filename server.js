@@ -554,6 +554,36 @@ app.post('/api/:connId/gateway/:action', asyncHandler(async (req, res) => {
   }
 }));
 
+// ── Doctor (fix) ─────────────────────────────────────────────────────────────
+
+app.post('/api/:connId/gateway/doctor', asyncHandler(async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
+
+  if (conn.type === 'local') {
+    mmLog('info', 'Doctor --fix requested', { connId: conn.id });
+    try {
+      const out = await run('openclaw doctor --fix --non-interactive', 60000);
+      mmLog('info', 'Doctor --fix completed', { output: out });
+      res.json({ ok: true, message: 'Doctor completed', output: out });
+    } catch (e) {
+      mmLog('error', 'Doctor --fix failed', { error: e.message, stdout: e.stdout, stderr: e.stderr });
+      // Doctor may exit non-zero but still produce useful output
+      res.json({ ok: false, error: e.message, output: e.stdout || e.stderr || '' });
+    }
+  } else {
+    // Remote: proxy to remote Model Manager
+    try {
+      const result = await remoteMMProxy(conn, '/api/local/gateway/doctor', 'POST');
+      mmLog('info', 'Remote doctor --fix succeeded', { connId: conn.id });
+      res.json({ ok: true, message: 'Doctor completed (remote)', result });
+    } catch (e) {
+      mmLog('error', 'Remote doctor --fix failed', { connId: conn.id, error: e.message });
+      apiError(res, 500, 'DOCTOR_ERROR', e.message);
+    }
+  }
+}));
+
 // ── Models (connection-aware) ────────────────────────────────────────────────
 
 app.get('/api/:connId/models/status', asyncHandler(async (req, res) => {
@@ -617,16 +647,47 @@ app.get('/api/:connId/models/list', asyncHandler(async (req, res) => {
 
   if (conn.type === 'local') {
     try {
-      // Read models.json directly instead of CLI (avoids EPERM on models.json)
+      // Get local Ollama models directly from Ollama API (fast, no CLI needed)
+      let localModels = [];
+      try {
+        const ollamaRes = await fetch('http://127.0.0.1:11434/api/tags');
+        if (ollamaRes.ok) {
+          const ollamaData = await ollamaRes.json();
+          localModels = (ollamaData.models || []).map(m => ({
+            key: `ollama/${m.name}`,
+            name: m.name,
+            local: true,
+            tags: [],
+            parameterSize: m.details?.parameter_size || '',
+            quantization: m.details?.quantization_level || '',
+            sizeHuman: m.size >= 1024 * 1024 * 1024
+              ? `${(m.size / 1024 ** 3).toFixed(1)} GB`
+              : `${Math.round(m.size / 1024 / 1024)} MB`,
+          }));
+        }
+      } catch {}
+
+      // Get API/external models from models.json (has providers structure)
       const agentDir = path.join(process.env.USERPROFILE || '', '.openclaw', 'agents', 'main', 'agent');
-      const modelsJson = readJsonFile(path.join(agentDir, 'models.json'));
-      const models = (modelsJson?.models || []).map(m => ({
-        key: typeof m === 'string' ? m : (m.key || m.id || ''),
-        name: m.name || m.key || '',
-        local: m.local || false,
-        tags: m.tags || [],
-      }));
-      res.json({ ok: true, data: { count: models.length, models } });
+      const modelsJson = readJsonFile(path.join(agentDir, 'models.json')) || {};
+      const apiModels = [];
+      for (const [provider, provData] of Object.entries(modelsJson.providers || {})) {
+        if (provider === 'ollama') continue; // already covered by Ollama API
+        for (const m of (provData.models || [])) {
+          apiModels.push({
+            key: `${provider}/${m.id}`,
+            name: m.name || m.id,
+            local: false,
+            tags: [],
+            parameterSize: '',
+            quantization: '',
+            sizeHuman: '',
+          });
+        }
+      }
+
+      const allModels = [...localModels, ...apiModels];
+      res.json({ ok: true, data: { count: allModels.length, models: allModels } });
     } catch (e) {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }
@@ -851,7 +912,6 @@ app.get('/api/:connId/models/available', asyncHandler(async (req, res) => {
           for (const m of provModels) {
             const modelId = m.id || m.key || '';
             if (!modelId) continue;
-            // Build full key — some models may already include provider prefix
             const key = modelId.includes('/') ? modelId : `${providerName}/${modelId}`;
             const isLocal = providerName === 'ollama' || providerData.api === 'ollama';
             models.push({
@@ -1265,6 +1325,298 @@ app.get('/api/system/local-models', asyncHandler(async (req, res) => {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 }));
+
+// ── Ollama Model Management (Pull / Delete / Copy) ────────────────────────────
+
+// Track in-progress pull jobs (keyed by pullId)
+const pullJobs = new Map();
+
+function getOllamaBase(conn) {
+  const host = conn.type === 'local' ? '127.0.0.1' : conn.host;
+  const port = conn.ollamaPort || (conn.type === 'local' ? 11434 : 11434);
+  return { host, port };
+}
+
+async function ollamaApi(conn, method, path, body, timeoutMs = 120000) {
+  const { host, port } = getOllamaBase(conn);
+  const url = `http://${host}:${port}${path}`;
+  const opts = { method, signal: AbortSignal.timeout(timeoutMs) };
+  if (body) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opts);
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    throw new Error(`Ollama API ${r.status}: ${text || r.statusText}`);
+  }
+  return r;
+}
+
+// POST /api/:connId/ollama/pull — stream pull progress via SSE
+app.post('/api/:connId/ollama/pull', async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+
+  const { model } = req.body;
+  if (!model) return res.status(400).json({ ok: false, error: 'model name is required' });
+
+  const pullId = `pull-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+  // Set up SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  // Helper to send SSE event
+  const send = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // Mark as started
+  send('started', { pullId, model, message: `Starting pull: ${model}` });
+
+  if (conn.type === 'local') {
+    // Local: use CLI and stream stdout/stderr
+    const { spawn } = require('child_process');
+    const isWindows = process.platform === 'win32';
+    const child = spawn(isWindows ? 'ollama' : 'ollama', ['pull', model], {
+      shell: true,
+      env: { ...process.env }
+    });
+
+    pullJobs.set(pullId, { connId: conn.id, model, child, done: false });
+    let done = false;
+    const finish = (status, message) => {
+      if (done) return;
+      done = true;
+      pullJobs.delete(pullId);
+      send('done', { pullId, model, status, message });
+      res.end();
+    };
+
+    child.stdout.on('data', (data) => {
+      const lines = data.toString().trim().split('\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+          send('progress', { pullId, model, ...parsed });
+        } catch {
+          send('stdout', { pullId, model, line });
+        }
+      }
+    });
+
+    child.stderr.on('data', (data) => {
+      const line = data.toString().trim();
+      if (line) send('stderr', { pullId, model, line });
+    });
+
+    child.on('error', (e) => finish('error', `Process error: ${e.message}`));
+    child.on('close', (code) => {
+      finish(code === 0 ? 'complete' : 'error', code === 0 ? 'Pull complete' : `Process exited with code ${code}`);
+    });
+
+    // Keepalive + cleanup check every 30s
+    const keepalive = setInterval(() => {
+      if (res.writableEnded) { clearInterval(keepalive); return; }
+      res.write(': keepalive\n\n');
+    }, 30000);
+
+    req.on('close', () => {
+      clearInterval(keepalive);
+      if (!done) {
+        finish('cancelled', 'Request cancelled by client');
+        child.kill();
+      }
+    });
+
+  } else {
+    // Remote: use Ollama API streaming endpoint
+    const { host, port } = getOllamaBase(conn);
+    let done = false;
+    const finish = (status, message) => {
+      if (done) return;
+      done = true;
+      pullJobs.delete(pullId);
+      send('done', { pullId, model, status, message });
+      res.end();
+    };
+
+    try {
+      // Ollama API streaming pull
+      const apiRes = await fetch(`http://${host}:${port}/api/pull`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(300000), // 5min initial connect
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: model, stream: true }),
+      });
+
+      if (!apiRes.ok) {
+        const text = await apiRes.text();
+        return finish('error', `Ollama API ${apiRes.status}: ${text}`);
+      }
+
+      pullJobs.set(pullId, { connId: conn.id, model, done: false });
+
+      const reader = apiRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const readChunk = () => {
+        reader.read().then(({ done: rd, value }) => {
+          if (rd) {
+            if (buffer) {
+              try {
+                const parsed = JSON.parse(buffer);
+                send('progress', { pullId, model, ...parsed });
+              } catch {
+                send('stdout', { pullId, model, line: buffer });
+              }
+            }
+            finish('complete', 'Pull complete');
+            return;
+          }
+          const text = decoder.decode(value, { stream: true });
+          const parts = (buffer + text).split('\n');
+          buffer = parts.pop() || '';
+          for (const part of parts) {
+            if (!part.trim()) continue;
+            try {
+              const parsed = JSON.parse(part);
+              send('progress', { pullId, model, ...parsed });
+            } catch {
+              send('stdout', { pullId, model, line: part });
+            }
+          }
+          readChunk();
+        });
+      };
+
+      readChunk();
+
+      req.on('close', () => {
+        if (!done) {
+          finish('cancelled', 'Request cancelled by client');
+          reader.cancel();
+        }
+      });
+
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        finish('error', 'Request timed out connecting to remote Ollama');
+      } else {
+        finish('error', e.message);
+      }
+    }
+
+    // Keepalive
+    const keepalive = setInterval(() => {
+      if (res.writableEnded) { clearInterval(keepalive); return; }
+      res.write(': keepalive\n\n');
+    }, 30000);
+    req.on('close', () => clearInterval(keepalive));
+  }
+});
+
+// GET /api/:connId/ollama/pull/status — list active pull jobs
+app.get('/api/:connId/ollama/pull/status', (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+
+  const active = [];
+  for (const [id, job] of pullJobs) {
+    if (job.connId === conn.id) {
+      active.push({ pullId: id, model: job.model, status: 'running' });
+    }
+  }
+  res.json({ ok: true, activePulls: active });
+});
+
+// POST /api/:connId/ollama/pull/:pullId/cancel — cancel a running pull
+app.post('/api/:connId/ollama/pull/:pullId/cancel', (req, res) => {
+  const job = pullJobs.get(req.params.pullId);
+  if (!job) return res.status(404).json({ ok: false, error: 'Pull job not found or already complete' });
+
+  try { job.child?.kill(); } catch {}
+  pullJobs.delete(req.params.pullId);
+  res.json({ ok: true, message: `Pull ${req.params.pullId} cancelled` });
+});
+
+// DELETE /api/:connId/ollama/models/:model — delete a model
+app.delete('/api/:connId/ollama/models/:model', async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+
+  const modelName = decodeURIComponent(req.params.model);
+  if (!modelName) return res.status(400).json({ ok: false, error: 'model name required' });
+
+  if (conn.type === 'local') {
+    const { exec } = require('child_process');
+    const cmd = `ollama rm "${modelName}"`;
+    return new Promise((resolve) => {
+      exec(cmd, { shell: true, timeout: 30000 }, (err, stdout, stderr) => {
+        if (err) {
+          const errMsg = (stderr || err.message || '').toLowerCase();
+          if (errMsg.includes('not found') || errMsg.includes('no such file') || errMsg.includes('failed to get file info')) {
+            res.json({ ok: true, message: `Model "${modelName}" is not installed (already removed)` });
+            return resolve();
+          }
+          res.status(500).json({ ok: false, error: stderr || err.message });
+          return resolve();
+        }
+        res.json({ ok: true, message: `Model "${modelName}" deleted` });
+        resolve();
+      });
+    });
+  } else {
+    // Remote: use Ollama API
+    try {
+      await ollamaApi(conn, 'DELETE', `/api/tags/${encodeURIComponent(modelName)}`);
+      res.json({ ok: true, message: `Model "${modelName}" deleted` });
+    } catch (e) {
+      const msg = e.message || '';
+      if (msg.includes('not found') || msg.includes('No such file')) {
+        res.json({ ok: true, message: `Model "${modelName}" is not installed (already removed)` });
+      } else {
+        res.status(500).json({ ok: false, error: msg });
+      }
+    }
+  }
+});
+
+// POST /api/:connId/ollama/copy — copy a model (duplicate with new name)
+app.post('/api/:connId/ollama/copy', async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return res.status(404).json({ ok: false, error: 'Connection not found' });
+
+  const { source, target } = req.body;
+  if (!source || !target) return res.status(400).json({ ok: false, error: 'source and target model names required' });
+
+  if (conn.type === 'local') {
+    const { exec } = require('child_process');
+    return new Promise((resolve) => {
+      exec(`ollama cp "${source}" "${target}"`, { shell: true, timeout: 30000 }, (err, stdout, stderr) => {
+        if (err) {
+          res.status(500).json({ ok: false, error: stderr || err.message });
+          return resolve();
+        }
+        res.json({ ok: true, message: `Copied "${source}" → "${target}"` });
+        resolve();
+      });
+    });
+  } else {
+    try {
+      await ollamaApi(conn, 'POST', '/api/copy', { source, target });
+      res.json({ ok: true, message: `Copied "${source}" → "${target}"` });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+});
 
 // ── Remote System Info & Local Models ─────────────────────────────────────────
 
@@ -2917,6 +3269,39 @@ wss.on('close', () => {
     clearInterval(statusInterval);
     statusInterval = null;
   }
+});
+
+// ── Manager Health ───────────────────────────────────────────────────────────
+
+app.get('/api/manager/health', (req, res) => {
+  res.json({ ok: true, pid: process.pid, uptime: process.uptime() });
+});
+
+// ── Self-Restart ─────────────────────────────────────────────────────────────
+
+app.post('/api/manager/restart', (req, res) => {
+  mmLog('info', 'Model Manager self-restart requested', { pid: process.pid });
+  res.json({ ok: true, message: 'Model Manager is restarting…' });
+
+  // Write a temp restart script that waits for us to exit, then starts fresh.
+  // This avoids Windows spawning visible console windows and restart loops.
+  const restartScript = path.join(__dirname, '_restart.bat');
+  const nodeExe = process.execPath.replace(/\//g, '\\');
+  const serverJs = path.join(__dirname, 'server.js').replace(/\//g, '\\');
+  fs.writeFileSync(restartScript, [
+    '@echo off',
+    `timeout /t 2 /nobreak >nul`,
+    `start "" /b "${nodeExe}" "${serverJs}"`,
+    `del "%~f0"`,
+  ].join('\r\n'));
+
+  exec(`cmd /c start /min "" "${restartScript}"`, { shell: true, windowsHide: true });
+
+  // Give the response time to flush, then exit
+  setTimeout(() => {
+    mmLog('info', 'Model Manager shutting down for restart');
+    process.exit(0);
+  }, 500);
 });
 
 // ── Start ────────────────────────────────────────────────────────────────────
