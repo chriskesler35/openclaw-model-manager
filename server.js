@@ -372,11 +372,19 @@ app.get('/api/connections/:id/health', asyncHandler(async (req, res) => {
 
   if (conn.type === 'local') {
     try {
-      const raw = await run('openclaw gateway status --json');
+      const raw = await run('openclaw gateway status --json', 8000);
       const parsed = tryJsonParse(raw);
       res.json({ ok: true, status: parsed || raw, rpcConsecutiveFailures: consecutiveFailures });
     } catch (e) {
-      res.json({ ok: true, status: { running: false, error: e.message, stdout: e.stdout }, rpcConsecutiveFailures: consecutiveFailures });
+      const net = require('net');
+      const port = conn.port || 18789;
+      const alive = await new Promise(ok => {
+        const s = net.createConnection({ host: '127.0.0.1', port, timeout: 2000 });
+        s.on('connect', () => { s.destroy(); ok(true); });
+        s.on('error', () => ok(false));
+        s.on('timeout', () => { s.destroy(); ok(false); });
+      });
+      res.json({ ok: true, status: { running: alive, note: 'CLI probe timed out', error: e.message }, rpcConsecutiveFailures: consecutiveFailures });
     }
     return;
   }
@@ -451,11 +459,24 @@ app.get('/api/:connId/gateway/status', asyncHandler(async (req, res) => {
 
   if (conn.type === 'local') {
     try {
-      const raw = await run('openclaw gateway status --json');
+      const raw = await run('openclaw gateway status --json', 8000);
       const parsed = tryJsonParse(raw);
       res.json({ ok: true, status: parsed || raw });
     } catch (e) {
-      res.json({ ok: true, status: { running: false, error: e.message, stdout: e.stdout } });
+      // Fallback: check if gateway port is listening
+      try {
+        const net = require('net');
+        const port = conn.port || 18789;
+        const alive = await new Promise(ok => {
+          const s = net.createConnection({ host: '127.0.0.1', port, timeout: 2000 });
+          s.on('connect', () => { s.destroy(); ok(true); });
+          s.on('error', () => ok(false));
+          s.on('timeout', () => { s.destroy(); ok(false); });
+        });
+        res.json({ ok: true, status: { running: alive, note: 'CLI probe timed out, fallback port check', error: e.message } });
+      } catch (e2) {
+        res.json({ ok: true, status: { running: false, error: e.message, stdout: e.stdout } });
+      }
     }
   } else {
     try {
@@ -710,8 +731,24 @@ app.post('/api/:connId/models/set', asyncHandler(async (req, res) => {
 
   if (conn.type === 'local') {
     try {
-      const out = await run(`openclaw models set '${sanitizeShellArg(model)}'`);
-      res.json({ ok: true, message: out || `Model set to ${model}` });
+      const config = readJsonFile(OPENCLAW_CONFIG);
+      if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read OpenClaw config');
+
+      // Ensure path exists
+      if (!config.agents) config.agents = {};
+      if (!config.agents.defaults) config.agents.defaults = {};
+      if (!config.agents.defaults.model || typeof config.agents.defaults.model === 'string') {
+        config.agents.defaults.model = {};
+      }
+
+      config.agents.defaults.model.primary = model;
+      writeJsonFile(OPENCLAW_CONFIG, config);
+
+      res.json({
+        ok: true,
+        message: `Primary model switched to ${model}`,
+        note: 'Change is immediate — no gateway restart needed.',
+      });
     } catch (e) {
       apiError(res, 500, 'INTERNAL_ERROR', e.message);
     }

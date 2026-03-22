@@ -1,5 +1,5 @@
 {
-  "activeProfileId": null,
+  "activeProfileId": "better-balance",
   "profiles": [
     {
       "id": "cloud-first",
@@ -56,6 +56,18 @@
         "ollama/qwen2.5-coder:32b",
         "anthropic/claude-opus-4-6",
         "openrouter/auto"
+      ]
+    },
+    {
+      "id": "better-balance",
+      "name": "Better Balance",
+      "description": "Using Best the locals",
+      "rules": [],
+      "primary": "anthropic/claude-opus-4-6",
+      "fallbacks": [
+        "ollama/minimax-m2.7:cloud",
+        "ollama/nemotron-3-super:cloud",
+        "google/gemini-3.1-pro-preview"
       ]
     }
   ]

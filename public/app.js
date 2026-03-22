@@ -746,6 +746,7 @@ async function runDoctorCheck() {
 
   btn.disabled = false;
   btn.innerHTML = '🔍 Run Check Only';
+}
 // ── Manager Self-Restart ─────────────────────────────────────────────────────
 
 async function restartManager() {
@@ -2738,8 +2739,6 @@ function clearLogDisplay() {
 }
 
 // ── Logs Tab ──────────────────────────────────────────────────────────────────
-
-let logAutoRefreshInterval = null;
 
 async function refreshLogFiles() {
   const select = byId('log-file-select');
