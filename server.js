@@ -3208,6 +3208,8 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 let statusInterval = null;
 
+const _remoteBroadcastInFlight = new Set();
+
 function broadcastStatus() {
   try {
     if (wss.clients.size === 0) return;
@@ -3243,25 +3245,31 @@ function broadcastStatus() {
             }
           });
       } else {
-        // Remote: use HTTP /health to avoid WS log spam on remote gateway too
-        const proto = conn.tls ? 'https' : 'http';
-        const url = `${proto}://${conn.host}:${conn.port}/health`;
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 4000);
+        // Remote: probe via remote Model Manager (gateway binds loopback, not reachable directly)
+        if (_remoteBroadcastInFlight.has(conn.id)) continue; // skip if previous probe still pending
+        _remoteBroadcastInFlight.add(conn.id);
 
-        fetch(url, {
+        const proto = conn.tls ? 'https' : 'http';
+        const mmPort = conn.mmPort || 18800;
+        const timeout = conn.timeoutMs || 15000;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
+
+        fetch(`${proto}://${conn.host}:${mmPort}/api/local/gateway/status`, {
           signal: controller.signal,
-          headers: conn.token ? { 'Authorization': `Bearer ${conn.token}` } : {},
         })
           .then(r => {
             clearTimeout(timer);
-            const payload = JSON.stringify({
-              type: 'gateway-status', connId: conn.id,
-              data: { running: r.ok, host: conn.host, port: conn.port }
+            return r.json().then(body => {
+              const status = body?.status || {};
+              const payload = JSON.stringify({
+                type: 'gateway-status', connId: conn.id,
+                data: { running: status.running !== false && (status.rpc?.ok || status.running === true), host: conn.host, port: conn.port, ...status }
+              });
+              for (const client of wss.clients) {
+                if (client.readyState === 1) client.send(payload);
+              }
             });
-            for (const client of wss.clients) {
-              if (client.readyState === 1) client.send(payload);
-            }
           })
           .catch(() => {
             clearTimeout(timer);
@@ -3272,7 +3280,10 @@ function broadcastStatus() {
             for (const client of wss.clients) {
               if (client.readyState === 1) client.send(payload);
             }
-        });
+          })
+          .finally(() => {
+            _remoteBroadcastInFlight.delete(conn.id);
+          });
       }
     }
   } catch (e) {
