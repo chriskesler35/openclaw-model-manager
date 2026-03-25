@@ -146,6 +146,27 @@ sudo systemctl enable openclaw-mm
 sudo systemctl start openclaw-mm
 ```
 
+## Changelog
+
+### v2025.03.25 — Remote Connectivity Fix
+
+**If you use remote connections (especially over Tailscale relay/DERP), update both sides.**
+
+**Fixes:**
+- **Gateway shows "Stopped" on remote connections** — The WebSocket status broadcast was probing the gateway port directly (`host:18789`), but gateways bind to `127.0.0.1` (loopback). Remote probes now route through the remote Model Manager, which can reach its own local gateway.
+- **Fetch Error toast spam on remote connections** — Five server-side endpoints had hardcoded 15-second timeouts that ignored the per-connection timeout setting. Tailscale DERP relay round-trips can take 20-30 seconds, causing constant timeout errors. All remote code paths now respect `conn.timeoutMs`.
+- **Request pile-up on slow connections** — System stats polled every 3 seconds even for remote connections. With 20-30s round-trips, 7-10 concurrent requests would stack up. Stats polling is now adaptive: 3s for local, 15s for remote. Added in-flight guards to prevent overlapping requests.
+- **Repeated error toast spam** — Identical error/warning toasts are now deduplicated within a 10-second window.
+
+**Upgrade:**
+```bash
+git pull
+# Restart the Model Manager on ALL machines (local and remote)
+node server.js
+```
+
+**Tip:** If you're on a Tailscale relay connection, set the Connection Timeout to 30000ms (30s) in the connection settings for that remote host.
+
 ## Architecture
 
 ```
