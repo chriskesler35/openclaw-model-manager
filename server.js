@@ -2691,9 +2691,16 @@ app.get('/api/routing/costs', asyncHandler(async (req, res) => {
     try {
       const raw = await run('openclaw gateway call status --json', 10000);
       const parsed = tryJsonParse(raw);
-      if (parsed?.sessions) sessions = parsed.sessions;
-      else if (parsed?.status?.sessions) sessions = parsed.status.sessions;
-      else if (Array.isArray(parsed)) sessions = parsed;
+      // sessions can be an object { recent: [...], byAgent: {...} } or already an array
+      if (parsed?.sessions) {
+        sessions = parsed.sessions.recent
+          || (Array.isArray(parsed.sessions) ? parsed.sessions : Object.values(parsed.sessions.byAgent || {}).flatMap(a => a.recent || []));
+      } else if (parsed?.status?.sessions) {
+        sessions = parsed.status.sessions.recent
+          || (Array.isArray(parsed.status.sessions) ? parsed.status.sessions : Object.values(parsed.status.sessions.byAgent || {}).flatMap(a => a.recent || []));
+      } else if (Array.isArray(parsed)) {
+        sessions = parsed;
+      }
     } catch {}
 
     // Calculate costs per model
