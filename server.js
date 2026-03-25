@@ -246,9 +246,16 @@ async function remoteMMProxy(conn, path, method = 'GET', body = null) {
     opts.headers = { 'Content-Type': 'application/json' };
     opts.body = JSON.stringify(body);
   }
-  const r = await fetch(url, opts);
-  if (!r.ok) throw new Error(`Remote MM returned HTTP ${r.status}`);
-  return await r.json();
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      return { ok: false, error: text || `Remote MM returned HTTP ${r.status}`, code: 'REMOTE_HTTP_ERROR' };
+    }
+    return await r.json();
+  } catch (e) {
+    return { ok: false, error: e.message, code: 'REMOTE_FETCH_ERROR' };
+  }
 }
 
 // Remote HTTP health check
