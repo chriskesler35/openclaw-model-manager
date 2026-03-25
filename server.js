@@ -256,7 +256,7 @@ async function httpHealthCheck(conn) {
   const proto = conn.tls ? 'https' : 'http';
   const url = `${proto}://${conn.host}:${conn.port}/health`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
+  const timer = setTimeout(() => controller.abort(), conn.timeoutMs || 15000);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
@@ -371,20 +371,19 @@ app.get('/api/connections/:id/health', asyncHandler(async (req, res) => {
   const consecutiveFailures = rpcFailures.get(req.params.id) || 0;
 
   if (conn.type === 'local') {
+    // Use HTTP /health instead of shelling out to `openclaw gateway status --json`
+    // to avoid WS probe spam in gateway logs
+    const port = conn.port || 18789;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
     try {
-      const raw = await run('openclaw gateway status --json', 8000);
-      const parsed = tryJsonParse(raw);
-      res.json({ ok: true, status: parsed || raw, rpcConsecutiveFailures: consecutiveFailures });
+      const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      const body = await r.json().catch(() => null);
+      res.json({ ok: true, status: { running: r.ok, rpc: { ok: r.ok }, port: { status: 'busy' }, gateway: { bindHost: '127.0.0.1', port }, ...(body || {}) }, rpcConsecutiveFailures: consecutiveFailures });
     } catch (e) {
-      const net = require('net');
-      const port = conn.port || 18789;
-      const alive = await new Promise(ok => {
-        const s = net.createConnection({ host: '127.0.0.1', port, timeout: 2000 });
-        s.on('connect', () => { s.destroy(); ok(true); });
-        s.on('error', () => ok(false));
-        s.on('timeout', () => { s.destroy(); ok(false); });
-      });
-      res.json({ ok: true, status: { running: alive, note: 'CLI probe timed out', error: e.message }, rpcConsecutiveFailures: consecutiveFailures });
+      clearTimeout(timer);
+      res.json({ ok: true, status: { running: false, error: e.message }, rpcConsecutiveFailures: consecutiveFailures });
     }
     return;
   }
@@ -458,25 +457,19 @@ app.get('/api/:connId/gateway/status', asyncHandler(async (req, res) => {
   if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
 
   if (conn.type === 'local') {
+    // Use HTTP /health instead of shelling out to `openclaw gateway status --json`
+    // to avoid WS probe spam in gateway logs
+    const port = conn.port || 18789;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
     try {
-      const raw = await run('openclaw gateway status --json', 8000);
-      const parsed = tryJsonParse(raw);
-      res.json({ ok: true, status: parsed || raw });
+      const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      const body = await r.json().catch(() => null);
+      res.json({ ok: true, status: { running: r.ok, rpc: { ok: r.ok }, port: { status: 'busy' }, gateway: { bindHost: '127.0.0.1', port }, ...(body || {}) } });
     } catch (e) {
-      // Fallback: check if gateway port is listening
-      try {
-        const net = require('net');
-        const port = conn.port || 18789;
-        const alive = await new Promise(ok => {
-          const s = net.createConnection({ host: '127.0.0.1', port, timeout: 2000 });
-          s.on('connect', () => { s.destroy(); ok(true); });
-          s.on('error', () => ok(false));
-          s.on('timeout', () => { s.destroy(); ok(false); });
-        });
-        res.json({ ok: true, status: { running: alive, note: 'CLI probe timed out, fallback port check', error: e.message } });
-      } catch (e2) {
-        res.json({ ok: true, status: { running: false, error: e.message, stdout: e.stdout } });
-      }
+      clearTimeout(timer);
+      res.json({ ok: true, status: { running: false, error: e.message } });
     }
   } else {
     try {
@@ -1142,9 +1135,10 @@ app.get('/api/:connId/system/stats', asyncHandler(async (req, res) => {
   // Remote: try Model Manager
   const mmPort = conn.mmPort || 18800;
   const proto = conn.tls ? 'https' : 'http';
+  const timeout = conn.timeoutMs || 15000;
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), timeout);
     const r = await fetch(`${proto}://${conn.host}:${mmPort}/api/system/stats`, { signal: controller.signal });
     clearTimeout(timer);
     if (r.ok) return res.json(await r.json());
@@ -1677,9 +1671,10 @@ app.get('/api/:connId/system/info', asyncHandler(async (req, res) => {
   const proto = conn.tls ? 'https' : 'http';
 
   // Try remote Model Manager first
+  const infoTimeout = conn.timeoutMs || 15000;
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), infoTimeout);
     const r = await fetch(`${proto}://${conn.host}:${mmPort}/api/system/info`, {
       signal: controller.signal,
     });
@@ -1714,10 +1709,11 @@ app.get('/api/:connId/system/local-models', asyncHandler(async (req, res) => {
   const mmPort = conn.mmPort || 18800;
   const ollamaPort = conn.ollamaPort || 11434;
   const proto = conn.tls ? 'https' : 'http';
+  const connTimeout = conn.timeoutMs || 15000;
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), connTimeout);
     const r = await fetch(`${proto}://${conn.host}:${mmPort}/api/system/local-models`, {
       signal: controller.signal,
     });
@@ -1732,7 +1728,7 @@ app.get('/api/:connId/system/local-models', asyncHandler(async (req, res) => {
   // Fallback: try Ollama API directly on the remote host
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), connTimeout);
     const r = await fetch(`http://${conn.host}:${ollamaPort}/api/tags`, {
       signal: controller.signal,
     });

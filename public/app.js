@@ -2,6 +2,7 @@
 let ws = null;
 let statsInterval = null;
 let wsReconnectTimer = null;
+let statsFetchInFlight = false; // prevent overlapping stats fetches
 
 // ── Centralized App State ────────────────────────────────────────────────────
 const AppState = {
@@ -104,9 +105,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Auto-discover system on first load
   refreshLocalModels();
 
-  // Start live system stats polling (every 3 seconds)
+  // Start live system stats polling (adaptive: 3s local, 15s remote)
   refreshSystemStats();
-  statsInterval = setInterval(refreshSystemStats, 3000);
+  startStatsPolling();
 
   // Provider failover status
   refreshProviderStatus();
@@ -167,11 +168,27 @@ function capiRetry(path) {
   return apiWithRetry('GET', `/api/${activeConnId}${path}`);
 }
 
+const _recentToasts = new Map(); // key → timestamp, for dedup
+const TOAST_DEDUP_MS = 10000; // suppress identical toasts within 10s
+
 function toast(msg, type = 'info') {
   // Always log to console so errors are captured in F12
   if (type === 'error') console.error('[toast]', msg);
   else if (type === 'warning') console.warn('[toast]', msg);
   else console.log('[toast]', msg);
+
+  // Deduplicate: suppress identical error/warning toasts within window
+  if (type === 'error' || type === 'warning') {
+    const key = type + ':' + msg;
+    const last = _recentToasts.get(key);
+    if (last && Date.now() - last < TOAST_DEDUP_MS) return; // suppress duplicate
+    _recentToasts.set(key, Date.now());
+    // Prune old entries periodically
+    if (_recentToasts.size > 50) {
+      const now = Date.now();
+      for (const [k, ts] of _recentToasts) { if (now - ts > TOAST_DEDUP_MS) _recentToasts.delete(k); }
+    }
+  }
 
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
@@ -277,6 +294,7 @@ function switchConnection() {
   activeConnId = byId('conn-select').value;
   localModelsLoaded = false;
   updateConnTypeBadge();
+  startStatsPolling(); // restart with adaptive interval for new connection
   refreshAll();
 
   // Refresh the currently visible tab's data
@@ -2228,16 +2246,29 @@ async function clearCooldown(provider) {
 
 // ── Live System Stats ────────────────────────────────────────────────────────
 
+function getStatsInterval() {
+  const conn = connections.find(c => c.id === activeConnId);
+  return (conn && conn.type === 'remote') ? 15000 : 3000;
+}
+
+function startStatsPolling() {
+  if (statsInterval) clearInterval(statsInterval);
+  statsInterval = setInterval(refreshSystemStats, getStatsInterval());
+}
+
 async function refreshSystemStats() {
+  if (statsFetchInFlight) return; // skip if previous request still pending
   const container = byId('live-system-stats');
   if (!container) return;
 
+  statsFetchInFlight = true;
   setLoading('system', true);
   try {
     const res = await capiRetry('/system/stats');
     if (!res?.ok || !res.data) {
       if (AppState.cache.system) markStale('live-system-stats');
       setLoading('system', false);
+      statsFetchInFlight = false;
       return;
     }
     AppState.cache.system = res.data;
@@ -2393,6 +2424,8 @@ async function refreshSystemStats() {
   } catch (e) {
     // Don't overwrite on transient errors — keep last good state
     if (AppState.cache.system) markStale('live-system-stats');
+  } finally {
+    statsFetchInFlight = false;
   }
   setLoading('system', false);
 }
