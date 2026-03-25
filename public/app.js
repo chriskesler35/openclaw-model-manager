@@ -93,6 +93,8 @@ Object.defineProperty(window, 'wsReconnectAttempts', {
 window.addEventListener('unhandledrejection', e => {
   console.error('Unhandled promise rejection:', e.reason);
   const msg = e.reason?.message || String(e.reason || 'Unknown error');
+  // Suppress noisy network errors from fire-and-forget refreshes — they're already handled by api()
+  if (/fetch|network|abort|timeout/i.test(msg)) return;
   toast(`Unexpected error: ${msg}`, 'error');
 });
 
@@ -103,14 +105,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   refreshAll();
 
   // Auto-discover system on first load
-  refreshLocalModels();
+  refreshLocalModels().catch(() => {});
 
   // Start live system stats polling (adaptive: 3s local, 15s remote)
-  refreshSystemStats();
+  refreshSystemStats().catch(() => {});
   startStatsPolling();
 
   // Provider failover status
-  refreshProviderStatus();
+  refreshProviderStatus().catch(() => {});
 
   byId('model-input').addEventListener('keydown', e => { if (e.key === 'Enter') setModel(); });
   byId('alias-model').addEventListener('keydown', e => { if (e.key === 'Enter') addAlias(); });
@@ -316,11 +318,11 @@ function updateConnTypeBadge() {
 
 function refreshAll() {
   updateConnTypeBadge();
-  fetchGatewayStatusFull();
-  refreshModels();
-  refreshFallbacks();
-  refreshAliases();
-  refreshAuth();
+  fetchGatewayStatusFull().catch(() => {});
+  refreshModels().catch(() => {});
+  refreshFallbacks().catch(() => {});
+  refreshAliases().catch(() => {});
+  refreshAuth().catch(() => {});
 }
 
 // Full status (for health tab - can take ~6-8s)
