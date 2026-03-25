@@ -104,6 +104,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   connectWebSocket();
   refreshAll();
 
+  // Show MM version in header
+  fetch('/api/manager/health').then(r => r.json()).then(h => {
+    const el = byId('mm-version');
+    if (el && h.version) el.textContent = 'v' + h.version;
+    else if (el) el.textContent = '';
+  }).catch(() => {});
+
   // Auto-discover system on first load
   refreshLocalModels().catch(() => {});
 
