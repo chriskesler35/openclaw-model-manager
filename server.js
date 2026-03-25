@@ -3324,8 +3324,15 @@ wss.on('close', () => {
 
 // ── Manager Health ───────────────────────────────────────────────────────────
 
+// Build version from git at startup
+let MM_VERSION = 'unknown';
+try {
+  const { execSync } = require('child_process');
+  MM_VERSION = execSync('git log -1 --format=%h', { cwd: __dirname, timeout: 3000 }).toString().trim();
+} catch {}
+
 app.get('/api/manager/health', (req, res) => {
-  res.json({ ok: true, pid: process.pid, uptime: process.uptime() });
+  res.json({ ok: true, pid: process.pid, uptime: process.uptime(), version: MM_VERSION, serverDir: __dirname });
 });
 
 // ── Self-Restart ─────────────────────────────────────────────────────────────
