@@ -1150,6 +1150,8 @@ async function saveFallbacks() {
       updateFallbackDirty();
       toast('✅ Fallback chain saved! Restart the gateway for changes to take effect.', 'success');
       feedback('fallback-feedback', '✅ ' + res.message + ' - ' + res.warning, 'success');
+      // Refresh the fallback list from server to ensure display is in sync
+      setTimeout(() => refreshFallbacks(), 500);
     } else {
       feedback('fallback-feedback', '❌ ' + (res.error || 'Save failed'), 'error');
     }

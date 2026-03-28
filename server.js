@@ -937,39 +937,57 @@ app.get('/api/:connId/models/available', asyncHandler(async (req, res) => {
 
   try {
     if (conn.type === 'local') {
+      // Get local Ollama models directly from Ollama API
+      let localModels = [];
+      try {
+        const ollamaRes = await fetch('http://127.0.0.1:11434/api/tags');
+        if (ollamaRes.ok) {
+          const ollamaData = await ollamaRes.json();
+          localModels = (ollamaData.models || []).map(m => ({
+            key: `ollama/${m.name}`,
+            name: m.name,
+            local: true,
+            tags: [],
+            provider: 'ollama',
+          }));
+        }
+      } catch {}
+
+      // Get API/external models from models.json
       const agentDir = path.join(process.env.USERPROFILE || '', '.openclaw', 'agents', 'main', 'agent');
       const modelsJson = readJsonFile(path.join(agentDir, 'models.json'));
 
-      let models = [];
+      let apiModels = [];
 
       // New format: { providers: { providerName: { models: [...] } } }
       if (modelsJson?.providers) {
         for (const [providerName, providerData] of Object.entries(modelsJson.providers)) {
+          if (providerName === 'ollama') continue; // already covered by Ollama API
           const provModels = providerData.models || [];
           for (const m of provModels) {
             const modelId = m.id || m.key || '';
             if (!modelId) continue;
             const key = modelId.includes('/') ? modelId : `${providerName}/${modelId}`;
-            const isLocal = providerName === 'ollama' || providerData.api === 'ollama';
-            models.push({
+            apiModels.push({
               key,
               name: m.name || modelId,
-              local: isLocal,
+              local: false,
               tags: m.tags || [],
               provider: providerName,
             });
           }
         }
-      } else {
+      } else if (modelsJson?.models) {
         // Legacy flat array format: { models: [...] }
-        models = (modelsJson?.models || []).map(m => ({
+        apiModels = (modelsJson.models || []).map(m => ({
           key: typeof m === 'string' ? m : (m.key || m.id || ''),
           name: m.name || m.key || '',
           local: m.local || false,
           tags: m.tags || [],
-        }));
+        })).filter(m => !m.key.startsWith('ollama/')); // exclude any ollama entries
       }
 
+      const models = [...localModels, ...apiModels];
       res.json({ ok: true, models });
     } else {
       const result = await remoteMMProxy(conn, '/api/local/models/available');
