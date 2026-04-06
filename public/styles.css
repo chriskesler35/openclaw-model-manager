@@ -467,6 +467,32 @@ table.model-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   letter-spacing: 0.06em; color: var(--text-label);
 }
 .form-field input { flex: none; width: 100%; }
+.rp-editor-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.oauth-sync-panel {
+  padding: 12px 14px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.oauth-sync-status {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.oauth-sync-status-ok { color: var(--success); }
+.oauth-sync-status-warn { color: var(--warning); }
+.oauth-sync-status-error { color: var(--danger); }
+.oauth-sync-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
 
 /* ── Modal ────────────────────────────────────────────────────────────────── */
 .modal {
@@ -499,6 +525,7 @@ table.model-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 /* ── Feedback & Toast ─────────────────────────────────────────────────────── */
 .feedback { margin-top: 10px; font-size: 12px; min-height: 18px; }
+.feedback.info { color: var(--text-dim); }
 .feedback.success { color: var(--success); }
 .feedback.error { color: var(--danger); }
 

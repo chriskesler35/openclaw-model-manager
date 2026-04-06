@@ -84,7 +84,9 @@ const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next
 
 function run(cmd, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
-    exec(cmd, { timeout: timeoutMs, shell: 'powershell.exe' }, (err, stdout, stderr) => {
+    // Build full PowerShell command with -NoProfile -NoLogo to skip conda/profile initialization
+    const fullCmd = `powershell.exe -NoProfile -NoLogo -Command "${cmd.replace(/"/g, '\\"')}"`;
+    exec(fullCmd, { timeout: timeoutMs }, (err, stdout, stderr) => {
       if (stderr) console.error(`[run stderr] ${stderr.trim()}`);
       if (err) {
         const e = new Error(stderr?.trim() || stdout?.trim() || err.message);
@@ -688,25 +690,28 @@ app.get('/api/:connId/models/list', asyncHandler(async (req, res) => {
         }
       } catch {}
 
-      // Get API/external models from models.json (has providers structure)
-      const agentDir = path.join(process.env.USERPROFILE || '', '.openclaw', 'agents', 'main', 'agent');
-      const modelsJson = readJsonFile(path.join(agentDir, 'models.json')) || {};
-      const apiModels = [];
-      for (const [provider, provData] of Object.entries(modelsJson.providers || {})) {
-        if (provider === 'ollama') continue; // already covered by Ollama API
-        for (const m of (provData.models || [])) {
-          apiModels.push({
-            key: `${provider}/${m.id}`,
-            name: m.name || m.id,
-            local: false,
-            tags: [],
-            parameterSize: '',
-            quantization: '',
-            sizeHuman: '',
-          });
-        }
-      }
+      // Get API/external models from OpenClaw config (source of truth)
+      const config = readJsonFile(OPENCLAW_CONFIG) || {};
+      const configModels = Object.entries(config.agents?.defaults?.models || {}).map(([key, entry]) => {
+        const [provider, ...idParts] = key.split('/');
+        const modelId = idParts.join('/');
+        return {
+          key,
+          id: modelId,
+          name: entry.name || modelId,
+          alias: entry.alias || null,
+          local: provider === 'ollama',
+          tags: [],
+          contextWindow: entry.contextWindow || null,
+          parameterSize: '',
+          quantization: '',
+          sizeHuman: '',
+        };
+      });
 
+      // Filter: only show non-local in this list (local are from Ollama API above)
+      const apiModels = configModels.filter(m => !m.local);
+      
       const allModels = [...localModels, ...apiModels];
       res.json({ ok: true, data: { count: allModels.length, models: allModels } });
     } catch (e) {
@@ -953,40 +958,25 @@ app.get('/api/:connId/models/available', asyncHandler(async (req, res) => {
         }
       } catch {}
 
-      // Get API/external models from models.json
-      const agentDir = path.join(process.env.USERPROFILE || '', '.openclaw', 'agents', 'main', 'agent');
-      const modelsJson = readJsonFile(path.join(agentDir, 'models.json'));
+      // Get API/external models from OpenClaw config (source of truth)
+      const config = readJsonFile(OPENCLAW_CONFIG) || {};
+      const configModels = Object.entries(config.agents?.defaults?.models || {}).map(([key, entry]) => {
+        const [provider, ...idParts] = key.split('/');
+        const modelId = idParts.join('/');
+        return {
+          key,
+          id: modelId,
+          name: entry.name || modelId,
+          alias: entry.alias || null,
+          local: provider === 'ollama',
+          tags: [],
+          provider,
+        };
+      });
 
-      let apiModels = [];
-
-      // New format: { providers: { providerName: { models: [...] } } }
-      if (modelsJson?.providers) {
-        for (const [providerName, providerData] of Object.entries(modelsJson.providers)) {
-          if (providerName === 'ollama') continue; // already covered by Ollama API
-          const provModels = providerData.models || [];
-          for (const m of provModels) {
-            const modelId = m.id || m.key || '';
-            if (!modelId) continue;
-            const key = modelId.includes('/') ? modelId : `${providerName}/${modelId}`;
-            apiModels.push({
-              key,
-              name: m.name || modelId,
-              local: false,
-              tags: m.tags || [],
-              provider: providerName,
-            });
-          }
-        }
-      } else if (modelsJson?.models) {
-        // Legacy flat array format: { models: [...] }
-        apiModels = (modelsJson.models || []).map(m => ({
-          key: typeof m === 'string' ? m : (m.key || m.id || ''),
-          name: m.name || m.key || '',
-          local: m.local || false,
-          tags: m.tags || [],
-        })).filter(m => !m.key.startsWith('ollama/')); // exclude any ollama entries
-      }
-
+      // Filter: only show non-local models here (local ones come from Ollama API above)
+      const apiModels = configModels.filter(m => !m.local);
+      
       const models = [...localModels, ...apiModels];
       res.json({ ok: true, models });
     } else {
@@ -1809,6 +1799,7 @@ app.get('/api/:connId/system/local-models', asyncHandler(async (req, res) => {
 
 const OPENCLAW_CONFIG = path.join(process.env.USERPROFILE || process.env.HOME, '.openclaw', 'openclaw.json');
 const AUTH_PROFILES = path.join(process.env.USERPROFILE || process.env.HOME, '.openclaw', 'agents', 'main', 'agent', 'auth-profiles.json');
+const CODEX_AUTH = path.join(process.env.USERPROFILE || process.env.HOME, '.codex', 'auth.json');
 
 function readJsonFile(filePath) {
   try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch { return null; }
@@ -1822,7 +1813,8 @@ function writeJsonFile(filePath, data) {
 const KNOWN_PROVIDERS = {
   anthropic: { authMode: 'token', label: 'Anthropic', keyPrefix: 'sk-ant-', placeholder: 'sk-ant-...' },
   openrouter: { authMode: 'api_key', label: 'OpenRouter', keyPrefix: 'sk-or-', placeholder: 'sk-or-v1-...' },
-  openai: { authMode: 'api_key', label: 'OpenAI', keyPrefix: 'sk-', placeholder: 'sk-...' },
+  openai: { authMode: 'api_key', label: 'OpenAI', keyPrefix: 'sk-', placeholder: 'sk-...', oauthImport: 'codex-cli' },
+  'openai-codex': { authMode: 'oauth', label: 'OpenAI Codex', keyPrefix: '', placeholder: '', oauthImport: 'codex-cli' },
   google: { authMode: 'api_key', label: 'Google AI', keyPrefix: 'AI', placeholder: 'AIza...' },
   mistral: { authMode: 'api_key', label: 'Mistral', keyPrefix: '', placeholder: 'API key' },
   groq: { authMode: 'api_key', label: 'Groq', keyPrefix: 'gsk_', placeholder: 'gsk_...' },
@@ -1830,6 +1822,74 @@ const KNOWN_PROVIDERS = {
   deepseek: { authMode: 'api_key', label: 'DeepSeek', keyPrefix: 'sk-', placeholder: 'sk-...' },
   ollama: { authMode: 'none', label: 'Ollama (Local)', keyPrefix: '', placeholder: '' },
 };
+
+function decodeJwtPayload(token) {
+  if (typeof token !== 'string' || token.split('.').length < 2) return null;
+  try {
+    const payload = token.split('.')[1];
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
+    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readCodexAuthSummary() {
+  const auth = readJsonFile(CODEX_AUTH);
+  if (!auth) return { ok: false, error: 'Codex CLI auth file not found' };
+
+  const accessToken = auth.tokens?.access_token || null;
+  const refreshToken = auth.tokens?.refresh_token || null;
+  const idToken = auth.tokens?.id_token || null;
+  const accessPayload = decodeJwtPayload(accessToken);
+  const idPayload = decodeJwtPayload(idToken);
+  const email = accessPayload?.['https://api.openai.com/profile']?.email || idPayload?.email || null;
+  const accountId = auth.tokens?.account_id || accessPayload?.['https://api.openai.com/auth']?.chatgpt_account_id || null;
+  const expires = accessPayload?.exp ? accessPayload.exp * 1000 : null;
+
+  return {
+    ok: true,
+    authMode: auth.auth_mode || null,
+    lastRefresh: auth.last_refresh || null,
+    email,
+    accountId,
+    expires,
+    hasAccessToken: !!accessToken,
+    hasRefreshToken: !!refreshToken,
+    accessToken,
+    refreshToken,
+  };
+}
+
+function ensureProviderConfigEntry(config, provider, profileId, mode, extra = {}) {
+  if (!config.auth) config.auth = { profiles: {} };
+  if (!config.auth.profiles) config.auth.profiles = {};
+  config.auth.profiles[profileId] = { provider, mode, ...extra };
+}
+
+function upsertOauthProfile({ provider, profileId, access, refresh, expires, email, accountId }) {
+  const authProfiles = readJsonFile(AUTH_PROFILES) || { version: 1, profiles: {}, lastGood: {}, usageStats: {} };
+  const config = readJsonFile(OPENCLAW_CONFIG) || {};
+
+  authProfiles.profiles[profileId] = {
+    type: 'oauth',
+    provider,
+    access,
+    refresh,
+    ...(expires ? { expires } : {}),
+    ...(email ? { email } : {}),
+    ...(accountId ? { accountId } : {}),
+  };
+  authProfiles.lastGood = authProfiles.lastGood || {};
+  authProfiles.lastGood[provider] = profileId;
+  writeJsonFile(AUTH_PROFILES, authProfiles);
+
+  ensureProviderConfigEntry(config, provider, profileId, 'oauth', email ? { email } : {});
+  writeJsonFile(OPENCLAW_CONFIG, config);
+
+  return { ok: true, profileId };
+}
 
 // GET known providers list
 app.get('/api/providers', (req, res) => {
@@ -1849,26 +1909,32 @@ app.get('/api/credentials/status', asyncHandler(async (req, res) => {
     // From config auth.profiles
     for (const [profileId, profile] of Object.entries(config.auth?.profiles || {})) {
       providers[profile.provider] = providers[profile.provider] || { profiles: [], hasCredentials: false };
-      providers[profile.provider].profiles.push({ profileId, mode: profile.mode });
+      providers[profile.provider].profiles.push({ profileId, mode: profile.mode, email: profile.email || null });
     }
 
     // From auth-profiles.json — check if keys exist (don't expose them)
     for (const [profileId, profile] of Object.entries(authProfiles.profiles || {})) {
       const prov = profile.provider;
       providers[prov] = providers[prov] || { profiles: [], hasCredentials: false };
-      const hasKey = !!(profile.token || profile.key || profile.apiKey);
-      if (hasKey) providers[prov].hasCredentials = true;
+      const hasCredential = !!(profile.token || profile.key || profile.apiKey || profile.access);
+      if (hasCredential) providers[prov].hasCredentials = true;
       // Mask the key for display
       const existing = providers[prov].profiles.find(p => p.profileId === profileId);
       if (existing) {
-        existing.hasKey = hasKey;
-        existing.keyHint = hasKey ? maskKey(profile.token || profile.key || profile.apiKey || '') : null;
+        existing.hasKey = !!(profile.token || profile.key || profile.apiKey);
+        existing.hasAccess = !!profile.access;
+        existing.email = existing.email || profile.email || null;
+        existing.expires = profile.expires || null;
+        existing.keyHint = existing.hasKey ? maskKey(profile.token || profile.key || profile.apiKey || '') : null;
       } else {
         providers[prov].profiles.push({
           profileId,
           mode: profile.type || 'api_key',
-          hasKey,
-          keyHint: hasKey ? maskKey(profile.token || profile.key || profile.apiKey || '') : null,
+          hasKey: !!(profile.token || profile.key || profile.apiKey),
+          hasAccess: !!profile.access,
+          email: profile.email || null,
+          expires: profile.expires || null,
+          keyHint: (profile.token || profile.key || profile.apiKey) ? maskKey(profile.token || profile.key || profile.apiKey || '') : null,
         });
       }
     }
@@ -1880,7 +1946,83 @@ app.get('/api/credentials/status', asyncHandler(async (req, res) => {
       }
     }
 
-    res.json({ ok: true, providers });
+    for (const provider of Object.keys(providers)) {
+      providers[provider].providerInfo = KNOWN_PROVIDERS[provider] || null;
+    }
+    for (const provider of ['openai', 'openai-codex']) {
+      providers[provider] = providers[provider] || { profiles: [], hasCredentials: false, providerInfo: KNOWN_PROVIDERS[provider] || null };
+      providers[provider].providerInfo = KNOWN_PROVIDERS[provider] || null;
+    }
+
+    const codexAuth = readCodexAuthSummary();
+    if (codexAuth.ok) {
+      for (const provider of ['openai', 'openai-codex']) {
+        providers[provider] = providers[provider] || { profiles: [], hasCredentials: false, providerInfo: KNOWN_PROVIDERS[provider] };
+        providers[provider].oauthSource = {
+          source: 'codex-cli',
+          loggedIn: !!(codexAuth.hasAccessToken && codexAuth.hasRefreshToken),
+          email: codexAuth.email,
+          expires: codexAuth.expires,
+          lastRefresh: codexAuth.lastRefresh,
+        };
+      }
+    }
+
+    res.json({ ok: true, providers, providerInfo: KNOWN_PROVIDERS });
+  } catch (e) {
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
+  }
+}));
+
+app.get('/api/oauth/codex/status', asyncHandler(async (req, res) => {
+  const summary = readCodexAuthSummary();
+  if (!summary.ok) return apiError(res, 404, 'NOT_FOUND', summary.error);
+
+  res.json({
+    ok: true,
+    source: 'codex-cli',
+    authMode: summary.authMode,
+    email: summary.email,
+    accountId: summary.accountId,
+    expires: summary.expires,
+    lastRefresh: summary.lastRefresh,
+    loggedIn: !!(summary.hasAccessToken && summary.hasRefreshToken),
+  });
+}));
+
+app.post('/api/oauth/codex/import', asyncHandler(async (req, res) => {
+  try {
+    const provider = req.body?.provider || 'openai-codex';
+    if (!['openai', 'openai-codex'].includes(provider)) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'provider must be "openai" or "openai-codex"');
+    }
+
+    const summary = readCodexAuthSummary();
+    if (!summary.ok) return apiError(res, 404, 'NOT_FOUND', summary.error);
+    if (!summary.hasAccessToken || !summary.hasRefreshToken) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'Codex CLI is not logged in with refreshable OAuth credentials');
+    }
+
+    const profileId = req.body?.profileId?.trim() || `${provider}:${summary.email || 'default'}`;
+    const result = upsertOauthProfile({
+      provider,
+      profileId,
+      access: summary.accessToken,
+      refresh: summary.refreshToken,
+      expires: summary.expires,
+      email: summary.email,
+      accountId: summary.accountId,
+    });
+
+    mmLog('info', `Imported Codex CLI OAuth into OpenClaw`, { provider, profileId, email: summary.email || null });
+    res.json({
+      ok: true,
+      message: `OAuth synced from Codex CLI for ${provider}`,
+      profileId: result.profileId,
+      email: summary.email,
+      expires: summary.expires,
+      warning: 'If the gateway is already running, restart it after active work finishes so the new auth state is picked up.',
+    });
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
@@ -1908,6 +2050,9 @@ app.post('/api/credentials/save', asyncHandler(async (req, res) => {
     }
     if (provInfo.authMode === 'none') {
       return apiError(res, 400, 'VALIDATION_ERROR', `${provInfo.label} does not require credentials`);
+    }
+    if (provInfo.authMode === 'oauth') {
+      return apiError(res, 400, 'VALIDATION_ERROR', `${provInfo.label} uses OAuth. Use the OAuth sync action instead of pasting a key.`);
     }
 
     // Use CLI paste-token for safety (handles config updates properly)
@@ -2026,6 +2171,128 @@ app.post('/api/models/add', asyncHandler(async (req, res) => {
     }
 
     res.json(result);
+  } catch (e) {
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
+  }
+}));
+
+// PUT edit model details in configuration
+app.put('/api/models/edit', asyncHandler(async (req, res) => {
+  try {
+    const { originalModelKey, provider, modelId, displayName, contextWindow, alias } = req.body;
+    if (!originalModelKey) return apiError(res, 400, 'VALIDATION_ERROR', 'originalModelKey is required');
+    if (!provider) return apiError(res, 400, 'VALIDATION_ERROR', 'provider is required');
+    if (!validate.isValidModelId(modelId)) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'modelId must be alphanumeric with hyphens, underscores, dots, colons, slashes, or @ (max 256 chars)');
+    }
+
+    const config = readJsonFile(OPENCLAW_CONFIG);
+    if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read config');
+
+    // Check if original model exists
+    if (!config.agents?.defaults?.models?.[originalModelKey]) {
+      return apiError(res, 404, 'NOT_FOUND', `Model ${originalModelKey} not found in configuration`);
+    }
+
+    // Construct the new model key
+    const newModelKey = `${provider}/${modelId}`;
+    
+    // Check if a different model with the new key already exists (but allow same key for updates)
+    if (newModelKey !== originalModelKey && config.agents.defaults.models[newModelKey]) {
+      return apiError(res, 409, 'CONFLICT', `Model ${newModelKey} already exists in configuration`);
+    }
+
+    // Get the old model entry
+    const oldModelEntry = config.agents.defaults.models[originalModelKey];
+
+    // Update with new values
+    const newModelEntry = { ...oldModelEntry };
+    if (alias !== undefined) {
+      if (alias) {
+        newModelEntry.alias = alias;
+      } else {
+        delete newModelEntry.alias;
+      }
+    }
+
+    // If the key changed, delete old and create new
+    if (newModelKey !== originalModelKey) {
+      delete config.agents.defaults.models[originalModelKey];
+      config.agents.defaults.models[newModelKey] = newModelEntry;
+      
+      // Update fallbacks if the old key was in there
+      if (config.agents?.defaults?.model?.fallbacks) {
+        config.agents.defaults.model.fallbacks = config.agents.defaults.model.fallbacks.map(f => 
+          f === originalModelKey ? newModelKey : f
+        );
+      }
+      
+      // Update primary if it was the old key
+      if (config.agents?.defaults?.model?.primary === originalModelKey) {
+        config.agents.defaults.model.primary = newModelKey;
+      }
+    } else {
+      // Same key, just update the entry
+      config.agents.defaults.models[newModelKey] = newModelEntry;
+    }
+
+    // For Ollama models, handle the models.providers.ollama.models array
+    const oldParts = originalModelKey.split('/');
+    const oldProvider = oldParts[0];
+    const oldModelId = oldParts.slice(1).join('/');
+    const newProvider = provider;
+    const newModelIdForConfig = modelId;
+
+    // If it was Ollama before, handle the removal/update
+    if (oldProvider === 'ollama' && config.models?.providers?.ollama?.models) {
+      if (newProvider === 'ollama') {
+        // Moving within Ollama: rename the entry
+        const modelEntry = config.models.providers.ollama.models.find(m => m.id === oldModelId);
+        if (modelEntry) {
+          modelEntry.id = newModelIdForConfig;
+          if (displayName !== undefined) modelEntry.name = displayName || newModelIdForConfig;
+          if (contextWindow !== undefined) {
+            modelEntry.contextWindow = contextWindow;
+            modelEntry.maxTokens = contextWindow;
+          }
+        }
+      } else {
+        // Moving out of Ollama: remove from ollama list
+        config.models.providers.ollama.models = config.models.providers.ollama.models.filter(m => m.id !== oldModelId);
+      }
+    } else if (newProvider === 'ollama') {
+      // Moving into Ollama: add to ollama models list
+      if (!config.models) config.models = {};
+      if (!config.models.providers) config.models.providers = {};
+      if (!config.models.providers.ollama) {
+        config.models.providers.ollama = {
+          baseUrl: 'http://127.0.0.1:11434',
+          apiKey: 'ollama-local',
+          api: 'ollama',
+          models: [],
+        };
+      }
+      if (!config.models.providers.ollama.models) config.models.providers.ollama.models = [];
+
+      config.models.providers.ollama.models.push({
+        id: newModelIdForConfig,
+        name: displayName || newModelIdForConfig,
+        reasoning: false,
+        input: 'text',
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: contextWindow || 32768,
+        maxTokens: contextWindow || 32768,
+      });
+    }
+
+    writeJsonFile(OPENCLAW_CONFIG, config);
+
+    const changedKey = newModelKey !== originalModelKey;
+    res.json({
+      ok: true,
+      message: changedKey ? `Model renamed to ${newModelKey}` : `Model ${newModelKey} updated successfully`,
+      warning: 'The gateway may need to be restarted for changes to take effect.',
+    });
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
@@ -2584,6 +2851,26 @@ function saveRoutingConfig(data) {
   fs.writeFileSync(ROUTING_CONFIG, JSON.stringify(data, null, 2), 'utf8');
 }
 
+function isValidFallbackList(fallbacks) {
+  return Array.isArray(fallbacks) && fallbacks.every(modelId => validate.isValidModelId(modelId));
+}
+
+function syncProfileToOpenClawConfig(profile) {
+  const config = readJsonFile(OPENCLAW_CONFIG);
+  if (!config) {
+    return { ok: false, error: 'Could not read OpenClaw config' };
+  }
+
+  config.agents = config.agents || {};
+  config.agents.defaults = config.agents.defaults || {};
+  config.agents.defaults.model = config.agents.defaults.model || {};
+  config.agents.defaults.model.id = profile.primary;
+  config.agents.defaults.model.fallbacks = profile.fallbacks;
+  writeJsonFile(OPENCLAW_CONFIG, config);
+
+  return { ok: true };
+}
+
 // List all profiles + active
 app.get('/api/routing/profiles', asyncHandler(async (req, res) => {
   const data = loadRoutingConfig();
@@ -2595,7 +2882,9 @@ app.post('/api/routing/profiles', asyncHandler(async (req, res) => {
   const { name, description, rules, primary, fallbacks } = req.body;
   if (!validate.isNonEmptyString(name)) return apiError(res, 400, 'VALIDATION_ERROR', 'name is required');
   if (!validate.isValidModelId(primary)) return apiError(res, 400, 'VALIDATION_ERROR', 'primary must be a valid model ID');
-  if (!Array.isArray(fallbacks)) return apiError(res, 400, 'VALIDATION_ERROR', 'fallbacks must be an array');
+  if (!isValidFallbackList(fallbacks)) return apiError(res, 400, 'VALIDATION_ERROR', 'fallbacks must be an array of valid model IDs');
+  if (description !== undefined && typeof description !== 'string') return apiError(res, 400, 'VALIDATION_ERROR', 'description must be a string');
+  if (rules !== undefined && !Array.isArray(rules)) return apiError(res, 400, 'VALIDATION_ERROR', 'rules must be an array');
 
   const data = loadRoutingConfig();
   const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
@@ -2616,6 +2905,12 @@ app.put('/api/routing/profiles/:id', asyncHandler(async (req, res) => {
   if (!profile) return apiError(res, 404, 'NOT_FOUND', 'Profile not found');
 
   const { name, description, rules, primary, fallbacks } = req.body;
+  if (name !== undefined && !validate.isNonEmptyString(name)) return apiError(res, 400, 'VALIDATION_ERROR', 'name must be a non-empty string');
+  if (description !== undefined && typeof description !== 'string') return apiError(res, 400, 'VALIDATION_ERROR', 'description must be a string');
+  if (rules !== undefined && !Array.isArray(rules)) return apiError(res, 400, 'VALIDATION_ERROR', 'rules must be an array');
+  if (primary !== undefined && !validate.isValidModelId(primary)) return apiError(res, 400, 'VALIDATION_ERROR', 'primary must be a valid model ID');
+  if (fallbacks !== undefined && !isValidFallbackList(fallbacks)) return apiError(res, 400, 'VALIDATION_ERROR', 'fallbacks must be an array of valid model IDs');
+
   if (name !== undefined) profile.name = name;
   if (description !== undefined) profile.description = description;
   if (rules !== undefined) profile.rules = rules;
@@ -2624,7 +2919,21 @@ app.put('/api/routing/profiles/:id', asyncHandler(async (req, res) => {
 
   saveRoutingConfig(data);
   mmLog('info', `Routing profile updated: ${profile.name}`, { id: profile.id });
-  res.json({ ok: true });
+
+  let warning = null;
+  let syncedActive = false;
+  if (data.activeProfileId === profile.id) {
+    const syncResult = syncProfileToOpenClawConfig(profile);
+    if (!syncResult.ok) {
+      warning = `Profile updated, but active config was not synced: ${syncResult.error}`;
+      mmLog('warn', `Active routing profile sync failed: ${profile.name}`, { id: profile.id, error: syncResult.error });
+    } else {
+      syncedActive = true;
+      mmLog('info', `Active routing profile synced: ${profile.name}`, { id: profile.id, primary: profile.primary, fallbacks: profile.fallbacks });
+    }
+  }
+
+  res.json({ ok: true, syncedActive, ...(warning ? { warning } : {}) });
 }));
 
 // Delete profile
@@ -2646,16 +2955,8 @@ app.post('/api/routing/profiles/:id/activate', asyncHandler(async (req, res) => 
   const profile = data.profiles.find(p => p.id === req.params.id);
   if (!profile) return apiError(res, 404, 'NOT_FOUND', 'Profile not found');
 
-  // Write to openclaw.json
-  const config = readJsonFile(OPENCLAW_CONFIG);
-  if (!config) return apiError(res, 500, 'CONFIG_ERROR', 'Could not read OpenClaw config');
-
-  config.agents = config.agents || {};
-  config.agents.defaults = config.agents.defaults || {};
-  config.agents.defaults.model = config.agents.defaults.model || {};
-  config.agents.defaults.model.id = profile.primary;
-  config.agents.defaults.model.fallbacks = profile.fallbacks;
-  writeJsonFile(OPENCLAW_CONFIG, config);
+  const syncResult = syncProfileToOpenClawConfig(profile);
+  if (!syncResult.ok) return apiError(res, 500, 'CONFIG_ERROR', syncResult.error);
 
   data.activeProfileId = profile.id;
   saveRoutingConfig(data);

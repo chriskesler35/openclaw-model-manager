@@ -3,6 +3,7 @@ let ws = null;
 let statsInterval = null;
 let wsReconnectTimer = null;
 let statsFetchInFlight = false; // prevent overlapping stats fetches
+let routingProfileEditId = null;
 
 // ── Centralized App State ────────────────────────────────────────────────────
 const AppState = {
@@ -13,6 +14,7 @@ const AppState = {
   connectionState: 'disconnected', // disconnected | connecting | connected | error
   gateway: { status: null, lastUpdate: null },
   models: { primary: null, fallbacks: [], aliases: {}, available: [], lastUpdate: null },
+  routing: { profiles: [], activeProfileId: null, lastUpdate: null },
   system: { gpu: [], ram: null, lastUpdate: null },
   providers: { status: {}, lastUpdate: null },
   auth: { profiles: {}, lastUpdate: null },
@@ -269,12 +271,23 @@ function switchTab(tabId) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabId));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabId}`));
 
+  // Clear loaded models refresh interval when leaving local tab
+  if (tabId !== 'local' && loadedModelsRefreshInterval) {
+    clearInterval(loadedModelsRefreshInterval);
+    loadedModelsRefreshInterval = null;
+  }
+
   // Lazy-load data for tabs
   if (tabId === 'health') { refreshHealth(); refreshProviderStatus(); }
   if (tabId === 'routing') refreshRouting();
   if (tabId === 'logs') refreshLogFiles();
   if (tabId === 'fallbacks') refreshFallbacks();
-  if (tabId === 'local') refreshLocalModels();
+  if (tabId === 'local') {
+    refreshLocalModels();
+    // Auto-refresh loaded models every 3 seconds while on this tab
+    if (loadedModelsRefreshInterval) clearInterval(loadedModelsRefreshInterval);
+    loadedModelsRefreshInterval = setInterval(() => refreshLoadedModels(), 3000);
+  }
   if (tabId === 'connections') renderConnList();
   if (tabId === 'logs') refreshLogs();
   if (tabId === 'auth') refreshCredentials();
@@ -932,7 +945,10 @@ async function refreshModelList() {
         <td style="font-family:var(--font);color:var(--text-dim)">${esc(name)}</td>
         <td>${esc(ctx)}</td>
         <td class="model-tags">${tagHtml}</td>
-        <td><button class="btn btn-sm btn-primary" onclick="quickSet('${esc(key)}')">Use</button></td>
+        <td style="display:flex;gap:4px">
+          <button class="btn btn-sm btn-primary" onclick="quickSet('${esc(key)}')">Use</button>
+          <button class="btn btn-sm" onclick="openEditModel('${esc(key)}', '${esc(name)}', ${m.contextWindow || 0}, '${esc(m.alias || '')}')">✏️ Edit</button>
+        </td>
       </tr>`;
     }
     html += '</tbody></table>';
@@ -945,6 +961,71 @@ async function refreshModelList() {
 function quickSet(model) {
   byId('model-input').value = model;
   setModel();
+}
+
+// ── Edit Model ────────────────────────────────────────────────────────────────
+
+function openEditModel(modelKey, displayName, contextWindow, alias) {
+  // Parse provider and model ID from the key (format: provider/modelId)
+  const parts = modelKey.split('/');
+  const provider = parts[0];
+  const modelId = parts.slice(1).join('/');
+  
+  // Store the original model key for later use
+  byId('edit-model-modal').setAttribute('data-model-key', modelKey);
+  
+  byId('edit-model-provider').value = provider;
+  byId('edit-model-id').value = modelId;
+  byId('edit-model-name').value = displayName || '';
+  byId('edit-model-ctx').value = contextWindow || '';
+  byId('edit-model-alias').value = alias || '';
+  byId('edit-model-feedback').innerHTML = '';
+  
+  byId('edit-model-modal').style.display = 'flex';
+}
+
+function closeEditModelModal() {
+  byId('edit-model-modal').style.display = 'none';
+  byId('edit-model-feedback').innerHTML = '';
+}
+
+async function saveEditModel() {
+  const originalModelKey = byId('edit-model-modal').getAttribute('data-model-key');
+  const provider = byId('edit-model-provider').value.trim();
+  const modelId = byId('edit-model-id').value.trim();
+  const displayName = byId('edit-model-name').value.trim();
+  const contextWindow = parseInt(byId('edit-model-ctx').value) || undefined;
+  const alias = byId('edit-model-alias').value.trim();
+
+  if (!originalModelKey) return feedback('edit-model-feedback', 'Model key missing', 'error');
+  if (!provider) return feedback('edit-model-feedback', 'Provider is required', 'error');
+  if (!modelId) return feedback('edit-model-feedback', 'Model ID is required', 'error');
+
+  feedback('edit-model-feedback', 'Saving…', 'info');
+
+  try {
+    const res = await api('PUT', '/api/models/edit', { 
+      originalModelKey,
+      provider,
+      modelId,
+      displayName: displayName || undefined,
+      contextWindow: contextWindow || undefined,
+      alias: alias || undefined
+    });
+
+    if (res.ok) {
+      feedback('edit-model-feedback', '✅ Model updated', 'success');
+      toast('Model updated', 'success');
+      setTimeout(() => {
+        closeEditModelModal();
+        refreshModels();
+      }, 500);
+    } else {
+      feedback('edit-model-feedback', `❌ ${res.error}`, 'error');
+    }
+  } catch (e) {
+    feedback('edit-model-feedback', `❌ Error: ${e.message}`, 'error');
+  }
 }
 
 // ── Fallbacks ────────────────────────────────────────────────────────────────
@@ -1334,6 +1415,25 @@ async function refreshAuth() {
 
 // ── Credential Management ────────────────────────────────────────────────────
 
+const AUTH_PROVIDER_META = {
+  anthropic: { authMode: 'token', label: 'Anthropic', inputLabel: 'Setup Token', hint: 'Starts with sk-ant-...', placeholder: 'sk-ant-...' },
+  openrouter: { authMode: 'api_key', label: 'OpenRouter', inputLabel: 'API Key', hint: 'Starts with sk-or-v1-...', placeholder: 'sk-or-v1-...' },
+  openai: { authMode: 'api_key', label: 'OpenAI', inputLabel: 'API Key', hint: 'Starts with sk-...', placeholder: 'sk-...', oauthImport: 'codex-cli' },
+  'openai-codex': { authMode: 'oauth', label: 'OpenAI Codex', inputLabel: 'OAuth', hint: '', placeholder: '', oauthImport: 'codex-cli' },
+  google: { authMode: 'api_key', label: 'Google AI', inputLabel: 'API Key', hint: 'Starts with AIza...', placeholder: 'AIza...' },
+  mistral: { authMode: 'api_key', label: 'Mistral', inputLabel: 'API Key', hint: '', placeholder: 'Paste API key' },
+  groq: { authMode: 'api_key', label: 'Groq', inputLabel: 'API Key', hint: 'Starts with gsk_...', placeholder: 'gsk_...' },
+  together: { authMode: 'api_key', label: 'Together AI', inputLabel: 'API Key', hint: '', placeholder: 'Paste API key' },
+  deepseek: { authMode: 'api_key', label: 'DeepSeek', inputLabel: 'API Key', hint: 'Starts with sk-...', placeholder: 'sk-...' },
+};
+
+function formatAuthExpiry(ts) {
+  if (!ts) return '';
+  const remaining = Number(ts) - Date.now();
+  if (remaining <= 0) return 'Expired';
+  return `Expires in ${dur(remaining)}`;
+}
+
 async function refreshCredentials() {
   const container = byId('credential-cards');
   if (!container) return;
@@ -1351,6 +1451,8 @@ async function refreshCredentials() {
     for (const [provider, info] of Object.entries(providers)) {
       const hasKey = info.hasCredentials;
       const isLocal = provider === 'ollama';
+      const authMode = info.providerInfo?.authMode || info.profiles?.[0]?.mode || AUTH_PROVIDER_META[provider]?.authMode || 'api_key';
+      const hasOauth = authMode === 'oauth' || (info.profiles || []).some(p => p.mode === 'oauth');
       const cardClass = isLocal ? 'cred-card-noauth' : hasKey ? 'cred-card-ok' : 'cred-card-missing';
       const icon = isLocal ? '💻' : hasKey ? '✅' : '❌';
 
@@ -1359,20 +1461,34 @@ async function refreshCredentials() {
       if (isLocal) {
         detail = 'No credentials needed - runs locally';
       } else if (hasKey) {
-        detail = `${info.profiles?.length || 0} profile(s) configured`;
-        // Show masked key hints
-        const withKeys = (info.profiles || []).filter(p => p.keyHint);
-        if (withKeys.length > 0) {
-          hint = withKeys.map(p => `${p.profileId}: ${p.keyHint}`).join(', ');
+        detail = hasOauth
+          ? `${info.profiles?.length || 0} OAuth profile(s) connected`
+          : `${info.profiles?.length || 0} profile(s) configured`;
+        const withHints = (info.profiles || []).filter(p => p.keyHint || p.email || p.expires);
+        if (withHints.length > 0) {
+          hint = withHints.map(p => {
+            const parts = [p.profileId];
+            if (p.email) parts.push(p.email);
+            if (p.keyHint) parts.push(p.keyHint);
+            if (p.expires) parts.push(formatAuthExpiry(p.expires));
+            return parts.join(' • ');
+          }).join(', ');
         }
       } else {
-        detail = 'No API key configured - click below to add one';
+        detail = hasOauth ? 'No OAuth profile configured yet' : 'No API key configured - click below to add one';
+      }
+
+      if (!hasKey && info.oauthSource?.loggedIn) {
+        const oauthParts = ['Codex CLI login detected'];
+        if (info.oauthSource.email) oauthParts.push(info.oauthSource.email);
+        if (info.oauthSource.expires) oauthParts.push(formatAuthExpiry(info.oauthSource.expires));
+        hint = oauthParts.join(' • ');
       }
 
       const actionHtml = !isLocal && !hasKey
-        ? `<button class="btn btn-sm btn-warning" onclick="focusCredForm('${provider}')">Add Key</button>`
+        ? `<button class="btn btn-sm btn-warning" onclick="focusCredForm('${provider}')">${hasOauth ? 'Connect OAuth' : 'Add Key'}</button>`
         : !isLocal
-        ? `<button class="btn btn-sm" onclick="focusCredForm('${provider}')">Update</button>`
+        ? `<button class="btn btn-sm" onclick="focusCredForm('${provider}')">${hasOauth ? 'Manage OAuth' : 'Update'}</button>`
         : '';
 
       cards.push(`<div class="cred-card ${cardClass}">
@@ -1407,21 +1523,18 @@ function onCredProviderChange() {
   const label = byId('cred-key-label');
   const hint = byId('cred-key-hint');
   const input = byId('cred-key');
+  const manualFields = byId('cred-manual-fields');
+  const oauthPanel = byId('cred-oauth-panel');
+  const saveBtn = byId('cred-save-btn');
+  const info = AUTH_PROVIDER_META[provider];
+  const showOauthPanel = !!info?.oauthImport;
+  const oauthOnly = info?.authMode === 'oauth';
+  if (manualFields) manualFields.style.display = oauthOnly ? 'none' : 'grid';
+  if (oauthPanel) oauthPanel.style.display = showOauthPanel ? 'block' : 'none';
+  if (saveBtn) saveBtn.style.display = oauthOnly ? 'none' : 'inline-flex';
 
-  const PROVIDERS = {
-    anthropic: { label: 'Setup Token', hint: 'Starts with sk-ant-...', placeholder: 'sk-ant-...' },
-    openrouter: { label: 'API Key', hint: 'Starts with sk-or-v1-...', placeholder: 'sk-or-v1-...' },
-    openai: { label: 'API Key', hint: 'Starts with sk-...', placeholder: 'sk-...' },
-    google: { label: 'API Key', hint: 'Starts with AIza...', placeholder: 'AIza...' },
-    mistral: { label: 'API Key', hint: '', placeholder: 'Paste API key' },
-    groq: { label: 'API Key', hint: 'Starts with gsk_...', placeholder: 'gsk_...' },
-    together: { label: 'API Key', hint: '', placeholder: 'Paste API key' },
-    deepseek: { label: 'API Key', hint: 'Starts with sk-...', placeholder: 'sk-...' },
-  };
-
-  const info = PROVIDERS[provider];
   if (info) {
-    if (label) label.textContent = info.label;
+    if (label) label.textContent = info.inputLabel;
     if (input) input.placeholder = info.placeholder;
     if (hint) {
       hint.textContent = info.hint;
@@ -1432,6 +1545,8 @@ function onCredProviderChange() {
     if (input) input.placeholder = 'Paste your API key or token here';
     if (hint) hint.style.display = 'none';
   }
+
+  if (showOauthPanel) refreshCodexOAuthStatus(provider);
 }
 
 async function saveCredential() {
@@ -1440,6 +1555,9 @@ async function saveCredential() {
   const profileId = byId('cred-profile-id')?.value?.trim();
 
   if (!provider) return feedback('cred-feedback', 'Please select a provider', 'error');
+  if (AUTH_PROVIDER_META[provider]?.authMode === 'oauth') {
+    return feedback('cred-feedback', 'This provider uses OAuth. Use the sync button below.', 'info');
+  }
   if (!key) return feedback('cred-feedback', 'Please enter an API key or token', 'error');
 
   feedback('cred-feedback', 'Saving credential…', 'info');
@@ -2620,6 +2738,60 @@ async function refreshLocalModels(force = false) {
   }
 
   localModelsLoaded = true;
+  
+  // Also refresh the loaded models list
+  refreshLoadedModels();
+}
+
+async function refreshLoadedModels() {
+  const container = byId('loaded-models-list');
+  if (!container) return;
+
+  try {
+    // Fetch currently running models from Ollama's /api/ps endpoint
+    const res = await fetch('http://127.0.0.1:11434/api/ps', { timeout: 5000 }).catch(() => null);
+    
+    if (!res || !res.ok) {
+      container.innerHTML = '<div class="empty-state" style="font-size:13px;color:var(--text-dim)">Ollama not responding or no models loaded</div>';
+      return;
+    }
+
+    const data = await res.json();
+    const models = data.models || [];
+
+    if (models.length === 0) {
+      container.innerHTML = '<div class="empty-state" style="font-size:13px;color:var(--text-dim)">No models currently loaded in VRAM</div>';
+      return;
+    }
+
+    // Sort by VRAM usage descending
+    models.sort((a, b) => (b.size_vram || 0) - (a.size_vram || 0));
+
+    let html = '<div style="display:grid;gap:12px">';
+    
+    for (const m of models) {
+      const name = m.name || m.model || '?';
+      const vramMB = m.size_vram ? Math.round(m.size_vram / (1024 * 1024)) : 0;
+      const vramGB = (vramMB / 1024).toFixed(1);
+      const totalModelSizeMB = m.size ? Math.round(m.size / (1024 * 1024)) : 0;
+      const expires = m.expires_at ? new Date(m.expires_at).toLocaleTimeString() : 'N/A';
+      
+      html += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:13px">
+        <div style="font-weight:500;margin-bottom:8px">🔥 ${esc(name)}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--text-label)">
+          <div>VRAM: <strong style="color:var(--text)">${vramGB} GB</strong> (${vramMB} MB)</div>
+          <div>Total: <strong style="color:var(--text)">${(totalModelSizeMB / 1024).toFixed(1)} GB</strong></div>
+          <div>Expires: <strong style="color:var(--text)">${expires}</strong></div>
+          <div style="text-align:right">Last used: <strong style="color:var(--text)">${m.expires_at ? 'Soon' : '—'}</strong></div>
+        </div>
+      </div>`;
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = `<div class="empty-state" style="font-size:13px;color:var(--text-dim)">Could not fetch loaded models: ${esc(e.message)}</div>`;
+  }
 }
 
 function autoAddDiscovered(name, host, port) {
@@ -2636,6 +2808,7 @@ let logAutoRefreshInterval = null;
 let lastLogSource = 'gateway';
 let lastLogLevel = 'all';
 let lastLogLimit = '100';
+let loadedModelsRefreshInterval = null;
 
 function escapeHtml(str) {
   if (typeof str !== 'string') return '';
@@ -2915,7 +3088,15 @@ async function refreshRouting() {
     api('GET', '/api/routing/costs/history'),
   ]);
 
-  if (profilesRes.ok) renderRoutingProfiles(profilesRes.profiles, profilesRes.activeProfileId);
+  if (profilesRes.ok) {
+    updateState('routing.profiles', profilesRes.profiles);
+    updateState('routing.activeProfileId', profilesRes.activeProfileId);
+    updateState('routing.lastUpdate', Date.now());
+    if (routingProfileEditId && !profilesRes.profiles.find(p => p.id === routingProfileEditId)) {
+      resetRoutingProfileForm();
+    }
+    renderRoutingProfiles(profilesRes.profiles, profilesRes.activeProfileId);
+  }
   if (costsRes.ok) renderCostSummary(costsRes.today);
   if (historyRes.ok) renderCostChart(historyRes.days);
 
@@ -3010,6 +3191,9 @@ function renderRoutingProfiles(profiles, activeId) {
   const activeCard = byId('active-profile-card');
   const active = profiles.find(p => p.id === activeId);
   if (active) {
+    const fallbackChain = active.fallbacks.length
+      ? active.fallbacks.map(f => `${modelIcon(f)} <code>${esc(f)}</code>`).join(' → ')
+      : '<span class="text-dim">No fallbacks configured</span>';
     activeCard.innerHTML = `
       <div class="rp-active-inner">
         <div class="rp-active-badge">Active</div>
@@ -3018,7 +3202,7 @@ function renderRoutingProfiles(profiles, activeId) {
         <div class="rp-chain">
           <strong>Primary:</strong> ${modelIcon(active.primary)} <code>${esc(active.primary)}</code>
           <span style="margin:0 8px;color:var(--text-label)">→</span>
-          ${active.fallbacks.map(f => `${modelIcon(f)} <code>${esc(f)}</code>`).join(' → ')}
+          ${fallbackChain}
         </div>
       </div>`;
   } else {
@@ -3039,8 +3223,10 @@ function renderRoutingProfiles(profiles, activeId) {
         ${modelIcon(p.primary)} <code>${esc(p.primary)}</code>
         ${p.fallbacks.slice(0, 3).map(f => `<span class="rp-arrow">→</span> ${modelIcon(f)} <code>${esc(f)}</code>`).join('')}
         ${p.fallbacks.length > 3 ? `<span class="rp-arrow">→</span> <span class="text-dim">+${p.fallbacks.length - 3} more</span>` : ''}
+        ${p.fallbacks.length === 0 ? '<span class="text-dim">No fallbacks configured</span>' : ''}
       </div>
       <div class="rp-card-actions">
+        <button class="btn btn-sm" onclick="event.stopPropagation(); editRoutingProfile('${esc(p.id)}')">Edit</button>
         ${isActive ? '<span class="text-dim">Currently active</span>' : `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); activateProfile('${esc(p.id)}')">Activate</button>`}
         ${!['cloud-first','local-first','balanced'].includes(p.id) ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteRoutingProfile('${esc(p.id)}')">Delete</button>` : ''}
       </div>
@@ -3058,7 +3244,43 @@ async function activateProfile(id) {
   }
 }
 
-async function createRoutingProfile() {
+function resetRoutingProfileForm() {
+  routingProfileEditId = null;
+  byId('rp-editor-title').textContent = 'Create Custom Profile';
+  byId('rp-save-btn').textContent = 'Create Profile';
+  byId('rp-cancel-btn').style.display = 'none';
+  byId('rp-name').value = '';
+  byId('rp-desc').value = '';
+  byId('rp-primary').value = '';
+  byId('rp-fallbacks').value = '';
+}
+
+function editRoutingProfile(id) {
+  const cards = getState('routing.profiles') || [];
+  const profile = cards.find(p => p.id === id);
+  if (!profile) {
+    toast('Profile not found', 'error');
+    return;
+  }
+
+  routingProfileEditId = id;
+  byId('rp-editor-title').textContent = `Edit Profile: ${profile.name}`;
+  byId('rp-save-btn').textContent = 'Save Changes';
+  byId('rp-cancel-btn').style.display = 'inline-flex';
+  byId('rp-name').value = profile.name || '';
+  byId('rp-desc').value = profile.description || '';
+  byId('rp-primary').value = profile.primary || '';
+  byId('rp-fallbacks').value = (profile.fallbacks || []).join(', ');
+  byId('rp-name').focus();
+  byId('rp-editor-title').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function cancelRoutingProfileEdit() {
+  resetRoutingProfileForm();
+  feedback('rp-feedback', 'Edit cancelled', 'info');
+}
+
+async function submitRoutingProfile() {
   const name = byId('rp-name').value.trim();
   const desc = byId('rp-desc').value.trim();
   const primary = byId('rp-primary').value.trim();
@@ -3070,16 +3292,82 @@ async function createRoutingProfile() {
   }
 
   const fallbacks = fallbacksStr ? fallbacksStr.split(',').map(s => s.trim()).filter(Boolean) : [];
-
-  const res = await api('POST', '/api/routing/profiles', { name, description: desc, primary, fallbacks });
+  const isEditing = !!routingProfileEditId;
+  const method = isEditing ? 'PUT' : 'POST';
+  const path = isEditing
+    ? `/api/routing/profiles/${encodeURIComponent(routingProfileEditId)}`
+    : '/api/routing/profiles';
+  const res = await api(method, path, { name, description: desc, primary, fallbacks });
   if (res.ok) {
-    toast('Profile created', 'success');
-    byId('rp-name').value = '';
-    byId('rp-desc').value = '';
-    byId('rp-primary').value = '';
-    byId('rp-fallbacks').value = '';
+    toast(isEditing ? 'Profile updated' : 'Profile created', 'success');
+    if (res.warning) toast(res.warning, 'warning');
+    resetRoutingProfileForm();
     refreshRouting();
+    if (res.syncedActive) refreshModels();
   }
+}
+
+async function refreshCodexOAuthStatus(providerOverride) {
+  const provider = providerOverride || byId('cred-provider')?.value;
+  const statusEl = byId('cred-oauth-status');
+  if (!statusEl || !provider || !AUTH_PROVIDER_META[provider]?.oauthImport) return;
+
+  statusEl.className = 'oauth-sync-status';
+  statusEl.textContent = 'Checking Codex CLI login…';
+
+  try {
+    const res = await api('GET', '/api/oauth/codex/status');
+    if (!res.ok) {
+      statusEl.className = 'oauth-sync-status oauth-sync-status-error';
+      statusEl.textContent = res.error || 'Codex CLI login not found';
+      return;
+    }
+
+    if (!res.loggedIn) {
+      statusEl.className = 'oauth-sync-status oauth-sync-status-warn';
+      statusEl.textContent = 'Codex CLI is installed, but no active OAuth session was found.';
+      return;
+    }
+
+    const parts = ['Codex CLI login ready'];
+    if (res.email) parts.push(res.email);
+    if (res.expires) parts.push(formatAuthExpiry(res.expires));
+    statusEl.className = 'oauth-sync-status oauth-sync-status-ok';
+    statusEl.textContent = parts.join(' • ');
+  } catch (e) {
+    statusEl.className = 'oauth-sync-status oauth-sync-status-error';
+    statusEl.textContent = `Could not check Codex CLI login: ${e.message}`;
+  }
+}
+
+async function syncCodexOAuth() {
+  const provider = byId('cred-provider')?.value;
+  const profileId = byId('cred-profile-id')?.value?.trim();
+  if (!provider) return feedback('cred-feedback', 'Please select a provider first', 'error');
+  if (!AUTH_PROVIDER_META[provider]?.oauthImport) return feedback('cred-feedback', 'This provider does not support Codex CLI OAuth sync', 'error');
+
+  feedback('cred-feedback', 'Syncing OAuth from Codex CLI…', 'info');
+
+  try {
+    const body = { provider };
+    if (profileId) body.profileId = profileId;
+    const res = await api('POST', '/api/oauth/codex/import', body);
+    if (res.ok) {
+      feedback('cred-feedback', `✅ ${res.message}`, 'success');
+      if (res.warning) toast(res.warning, 'warning');
+      refreshCodexOAuthStatus(provider);
+      refreshCredentials();
+      refreshAuth();
+    } else {
+      feedback('cred-feedback', `❌ ${res.error}`, 'error');
+    }
+  } catch (e) {
+    feedback('cred-feedback', `❌ Error: ${e.message}`, 'error');
+  }
+}
+
+async function createRoutingProfile() {
+  return submitRoutingProfile();
 }
 
 async function deleteRoutingProfile(id) {
@@ -3087,6 +3375,7 @@ async function deleteRoutingProfile(id) {
   const res = await api('DELETE', `/api/routing/profiles/${encodeURIComponent(id)}`);
   if (res.ok) {
     toast('Profile deleted', 'success');
+    if (routingProfileEditId === id) resetRoutingProfileForm();
     refreshRouting();
   }
 }

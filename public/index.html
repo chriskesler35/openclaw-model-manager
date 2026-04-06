@@ -220,7 +220,7 @@
 
           <!-- Custom Profile Editor -->
           <div class="sub-section" style="margin-top:24px">
-            <h3>Create Custom Profile</h3>
+            <h3 id="rp-editor-title">Create Custom Profile</h3>
             <div class="form-grid">
               <div class="form-field">
                 <label>Profile Name</label>
@@ -239,7 +239,10 @@
                 <input type="text" id="rp-fallbacks" placeholder="e.g. ollama/qwen2.5-coder:14b, anthropic/claude-opus-4-6">
               </div>
             </div>
-            <button class="btn btn-primary" onclick="createRoutingProfile()" style="margin-top:12px">Create Profile</button>
+            <div class="rp-editor-actions">
+              <button class="btn btn-primary" id="rp-save-btn" onclick="submitRoutingProfile()" style="margin-top:12px">Create Profile</button>
+              <button class="btn btn-sm" id="rp-cancel-btn" onclick="cancelRoutingProfileEdit()" style="margin-top:12px; display:none">Cancel Edit</button>
+            </div>
             <div id="rp-feedback" class="feedback"></div>
           </div>
 
@@ -397,6 +400,7 @@
                     <option value="anthropic">Anthropic</option>
                     <option value="openrouter">OpenRouter</option>
                     <option value="openai">OpenAI</option>
+                    <option value="openai-codex">OpenAI Codex</option>
                     <option value="google">Google AI</option>
                     <option value="mistral">Mistral</option>
                     <option value="groq">Groq</option>
@@ -550,6 +554,7 @@
                   <option value="anthropic">Anthropic</option>
                   <option value="openrouter">OpenRouter</option>
                   <option value="openai">OpenAI</option>
+                  <option value="openai-codex">OpenAI Codex</option>
                   <option value="google">Google AI</option>
                   <option value="mistral">Mistral</option>
                   <option value="groq">Groq</option>
@@ -557,6 +562,8 @@
                   <option value="deepseek">DeepSeek</option>
                 </select>
               </div>
+            </div>
+            <div id="cred-manual-fields" class="form-grid" style="margin-top:12px">
               <div class="form-field">
                 <label id="cred-key-label">API Key / Token</label>
                 <input type="password" id="cred-key" placeholder="Paste your API key or token here">
@@ -567,7 +574,16 @@
                 <input type="text" id="cred-profile-id" placeholder="e.g. anthropic:default (auto-generated)">
               </div>
             </div>
-            <button class="btn btn-primary" onclick="saveCredential()" style="margin-top:12px">💾 Save Credential</button>
+            <div id="cred-oauth-panel" class="oauth-sync-panel" style="display:none; margin-top:12px">
+              <div id="cred-oauth-status" class="oauth-sync-status">Checking Codex CLI login…</div>
+              <div class="oauth-sync-actions">
+                <button class="btn btn-primary" onclick="syncCodexOAuth()">Sync OAuth From Codex CLI</button>
+              </div>
+              <div class="field-hint" style="margin-top:8px">
+                Uses your existing login from <code>~/.codex/auth.json</code> and writes an OpenClaw OAuth auth profile for the selected provider.
+              </div>
+            </div>
+            <button class="btn btn-primary" id="cred-save-btn" onclick="saveCredential()" style="margin-top:12px">💾 Save Credential</button>
             <div id="cred-feedback" class="feedback"></div>
           </div>
 
@@ -619,6 +635,14 @@
           <!-- System Specs -->
           <div id="system-specs" class="stats-grid" style="margin-bottom:20px">
             <div class="empty-state">Loading system info…</div>
+          </div>
+
+          <!-- Currently Loaded Models (in VRAM) -->
+          <div class="sub-section" style="margin-bottom:20px">
+            <h3>🎮 Currently Loaded in VRAM</h3>
+            <div id="loaded-models-list" style="margin-top:12px">
+              <div class="empty-state" style="font-size:13px">Loading…</div>
+            </div>
           </div>
 
           <!-- Compatibility Legend -->
@@ -785,6 +809,46 @@ netsh advfirewall firewall add rule name="OpenClaw Gateway" dir=in action=allow 
       </section>
 
     </main>
+
+    <!-- Edit Model Modal -->
+    <div id="edit-model-modal" class="modal" style="display:none">
+      <div class="modal-backdrop" onclick="closeEditModelModal()"></div>
+      <div class="modal-content" style="max-width:500px">
+        <div class="modal-header">
+          <h2>✏️ Edit Model</h2>
+          <button class="btn-close" onclick="closeEditModelModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-grid">
+            <div class="form-field">
+              <label>Provider</label>
+              <input type="text" id="edit-model-provider" placeholder="e.g. anthropic, openai, ollama" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Model ID</label>
+              <input type="text" id="edit-model-id" placeholder="e.g. claude-sonnet-4-5-20250514" autocomplete="off">
+            </div>
+            <div class="form-field">
+              <label>Display Name</label>
+              <input type="text" id="edit-model-name" placeholder="e.g. Claude Sonnet 4.5">
+            </div>
+            <div class="form-field">
+              <label>Context Window</label>
+              <input type="number" id="edit-model-ctx" placeholder="200000">
+            </div>
+            <div class="form-field">
+              <label>Alias <span class="optional">(optional)</span></label>
+              <input type="text" id="edit-model-alias" placeholder="e.g. sonnet">
+            </div>
+          </div>
+          <div id="edit-model-feedback" class="feedback"></div>
+        </div>
+        <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:16px;border-top:1px solid var(--border)">
+          <button class="btn" onclick="closeEditModelModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="saveEditModel()">💾 Save Changes</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Connection Modal (kept for quick access from header) -->
     <div id="conn-modal" class="modal" style="display:none">
