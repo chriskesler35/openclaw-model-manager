@@ -2,3 +2,5 @@ node_modules/
 connections.json
 prompt-cache.json
 cache-config.json
+.vscode/
+openclaw-model-manager/

@@ -307,6 +307,21 @@
               <span id="gw-port" class="stat-value mono">—</span>
             </div>
           </div>
+
+          <!-- Live model card -->
+          <div class="model-live-card" id="model-live-card">
+            <div class="model-live-top">
+              <span class="model-live-label">Live Model</span>
+              <span id="model-live-badge" class="model-live-badge" style="display:none"></span>
+            </div>
+            <div id="model-live-actual" class="model-live-primary">—</div>
+            <div id="model-live-session-meta" class="model-live-session-meta"></div>
+            <div class="model-live-configured-row" id="model-live-configured-row" style="display:none">
+              <span class="model-live-configured-label">Configured primary:</span>
+              <span id="model-live-configured" class="model-live-configured"></span>
+            </div>
+            <div id="model-live-fallbacks" class="model-live-fallbacks" style="margin-top:8px"></div>
+          </div>
           <div class="button-group" style="margin-top:20px">
             <button class="btn btn-success btn-lg" onclick="gatewayAction('start')" id="btn-start">
               ▶ Start
@@ -317,11 +332,27 @@
             <button class="btn btn-warning btn-lg" onclick="gatewayAction('restart')" id="btn-restart">
               ↻ Restart
             </button>
+            <button class="btn btn-info btn-lg" onclick="startOpenClawUpdate()" id="btn-update-openclaw" title="Stop OpenClaw, run update, then start OpenClaw again">
+              ⬆ Update OpenClaw
+            </button>
             <button class="btn btn-info btn-lg" onclick="doctorFix()" id="btn-doctor" title="Run openclaw doctor --fix to diagnose and repair gateway issues">
               🩺 Doctor Fix
             </button>
           </div>
           <div id="gateway-feedback" class="feedback"></div>
+
+          <div class="openclaw-update-card" id="openclaw-update-card">
+            <div class="openclaw-update-header">
+              <h3>OpenClaw Update Status</h3>
+              <span id="openclaw-update-pill" class="openclaw-update-pill update-idle">Idle</span>
+            </div>
+            <p id="openclaw-update-message" class="openclaw-update-message">No update running.</p>
+            <p id="openclaw-update-meta" class="openclaw-update-meta"></p>
+            <div id="openclaw-update-log" class="openclaw-update-log"></div>
+            <div style="margin-top:10px">
+              <button class="btn btn-sm btn-danger" id="btn-cancel-openclaw-update" onclick="cancelOpenClawUpdate()" style="display:none">Cancel Stuck Update</button>
+            </div>
+          </div>
 
           <!-- Doctor --fix -->
           <div style="margin-top:28px; padding-top:20px; border-top: 1px solid var(--border);">
@@ -397,15 +428,6 @@
                   <label>Provider</label>
                   <select id="add-model-provider">
                     <option value="">Select provider…</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="openrouter">OpenRouter</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="openai-codex">OpenAI Codex</option>
-                    <option value="google">Google AI</option>
-                    <option value="mistral">Mistral</option>
-                    <option value="groq">Groq</option>
-                    <option value="together">Together AI</option>
-                    <option value="deepseek">DeepSeek</option>
                   </select>
                 </div>
                 <div class="form-field">
@@ -532,7 +554,7 @@
           <!-- Credential Management -->
           <div class="sub-section" style="margin-top:24px">
             <h3>🔐 Manage Credentials</h3>
-            <p class="panel-desc">Add or update API keys for your providers. Credentials are stored locally in your OpenClaw auth profiles.</p>
+            <p class="panel-desc">Add or update API keys and OAuth credentials for your providers. Credentials are stored locally in your OpenClaw auth profiles.</p>
             <div id="credential-cards" class="cred-grid">
               <div class="empty-state">Loading credential status…</div>
             </div>
@@ -551,15 +573,6 @@
                 <label>Provider</label>
                 <select id="cred-provider" onchange="onCredProviderChange()">
                   <option value="">Select provider…</option>
-                  <option value="anthropic">Anthropic</option>
-                  <option value="openrouter">OpenRouter</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="openai-codex">OpenAI Codex</option>
-                  <option value="google">Google AI</option>
-                  <option value="mistral">Mistral</option>
-                  <option value="groq">Groq</option>
-                  <option value="together">Together AI</option>
-                  <option value="deepseek">DeepSeek</option>
                 </select>
               </div>
             </div>
@@ -581,6 +594,40 @@
               </div>
               <div class="field-hint" style="margin-top:8px">
                 Uses your existing login from <code>~/.codex/auth.json</code> and writes an OpenClaw OAuth auth profile for the selected provider.
+              </div>
+            </div>
+            <div id="cred-copilot-oauth-panel" class="oauth-sync-panel" style="display:none; margin-top:12px">
+              <div id="cred-copilot-oauth-status" class="oauth-sync-status">Checking GitHub Copilot connection…</div>
+              <div class="oauth-sync-actions">
+                <button class="btn btn-primary" id="btn-copilot-connect" onclick="connectGitHubCopilotOAuth()">Connect GitHub Copilot</button>
+                <button class="btn" onclick="refreshGitHubCopilotOAuthStatus(true)">Refresh</button>
+              </div>
+              <div class="field-hint" style="margin-top:8px">
+                This launches OpenClaw's GitHub device flow in a new terminal window and opens GitHub verification, similar to VS Code sign-in.
+              </div>
+            </div>
+            <div id="cred-oauth-manual-panel" class="oauth-sync-panel" style="display:none; margin-top:12px">
+              <div class="form-grid">
+                <div class="form-field">
+                  <label>OAuth Access Token</label>
+                  <input type="password" id="cred-oauth-access" placeholder="Paste OAuth access token">
+                </div>
+                <div class="form-field">
+                  <label>OAuth Refresh Token <span class="optional">(optional)</span></label>
+                  <input type="password" id="cred-oauth-refresh" placeholder="Paste OAuth refresh token">
+                </div>
+                <div class="form-field">
+                  <label>Expires At <span class="optional">(optional)</span></label>
+                  <input type="text" id="cred-oauth-expires" placeholder="Epoch ms or ISO datetime">
+                </div>
+                <div class="form-field">
+                  <label>Email <span class="optional">(optional)</span></label>
+                  <input type="email" id="cred-oauth-email" placeholder="user@example.com">
+                </div>
+              </div>
+              <button class="btn btn-primary" onclick="saveOAuthCredential()" style="margin-top:12px">💾 Save OAuth Credential</button>
+              <div class="field-hint" style="margin-top:8px">
+                Use this for OAuth providers that do not have an automatic import integration yet.
               </div>
             </div>
             <button class="btn btn-primary" id="cred-save-btn" onclick="saveCredential()" style="margin-top:12px">💾 Save Credential</button>

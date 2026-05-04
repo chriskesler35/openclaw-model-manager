@@ -4,6 +4,10 @@ let statsInterval = null;
 let wsReconnectTimer = null;
 let statsFetchInFlight = false; // prevent overlapping stats fetches
 let routingProfileEditId = null;
+let openClawUpdatePollTimer = null;
+let openClawUpdateState = null;
+let lastOpenClawUpdateTerminalState = null;
+let copilotOauthPollTimer = null;
 
 // ── Centralized App State ────────────────────────────────────────────────────
 const AppState = {
@@ -103,8 +107,11 @@ window.addEventListener('unhandledrejection', e => {
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   await loadConnections();
+  await loadProviderRegistry();
   connectWebSocket();
   refreshAll();
+  refreshOpenClawUpdateStatus();
+  startOpenClawUpdatePolling();
 
   // Show MM version in header
   fetch('/api/manager/health').then(r => r.json()).then(h => {
@@ -283,7 +290,7 @@ function switchTab(tabId) {
   if (tabId === 'logs') refreshLogFiles();
   if (tabId === 'fallbacks') refreshFallbacks();
   if (tabId === 'local') {
-    refreshLocalModels();
+    refreshLocalModels(true);
     // Auto-refresh loaded models every 3 seconds while on this tab
     if (loadedModelsRefreshInterval) clearInterval(loadedModelsRefreshInterval);
     loadedModelsRefreshInterval = setInterval(() => refreshLoadedModels(), 3000);
@@ -322,9 +329,11 @@ function switchConnection() {
   // Refresh the currently visible tab's data
   const activeTab = document.querySelector('.tab.active')?.dataset?.tab;
   if (activeTab === 'health') { refreshHealth(); refreshSystemStats(); refreshProviderStatus(); }
-  if (activeTab === 'local') refreshLocalModels();
+  if (activeTab === 'local') refreshLocalModels(true);
   if (activeTab === 'auth') refreshCredentials();
   if (activeTab === 'connections') renderConnList();
+
+  refreshOpenClawUpdateStatus();
 }
 
 function updateConnTypeBadge() {
@@ -343,6 +352,7 @@ function refreshAll() {
   refreshFallbacks().catch(() => {});
   refreshAliases().catch(() => {});
   refreshAuth().catch(() => {});
+  refreshOpenClawUpdateStatus(true);
 }
 
 // Full status (for health tab - can take ~6-8s)
@@ -486,6 +496,243 @@ function updateGatewayUI(data) {
 
   byId('btn-start').disabled = running;
   byId('btn-stop').disabled = !running;
+  applyOpenClawUpdateButtonLock();
+
+  // Live model display
+  const modelInfo = data?.model;
+  const actualEl = byId('model-live-actual');
+  const badgeEl = byId('model-live-badge');
+  const sessionMetaEl = byId('model-live-session-meta');
+  const configuredRowEl = byId('model-live-configured-row');
+  const configuredEl = byId('model-live-configured');
+  const fallbacksEl = byId('model-live-fallbacks');
+  if (modelInfo) {
+    const sess = modelInfo.session;
+    const configured = modelInfo.primary;
+    const actualModel = sess?.model ? `${sess.provider ? sess.provider + '/' : ''}${sess.model}` : configured;
+    const isFallback = configured && actualModel && actualModel !== configured && !actualModel.endsWith('/' + configured);
+    const isActive = sess?.isActive;
+
+    actualEl.textContent = actualModel || '—';
+    actualEl.title = actualModel || '';
+
+    // Badge: LIVE (running) or FALLBACK or LAST USED
+    if (isActive) {
+      badgeEl.textContent = '● LIVE';
+      badgeEl.className = 'model-live-badge badge-live';
+      badgeEl.style.display = '';
+    } else if (isFallback) {
+      badgeEl.textContent = '⚡ FALLBACK';
+      badgeEl.className = 'model-live-badge badge-fallback';
+      badgeEl.style.display = '';
+    } else {
+      badgeEl.style.display = 'none';
+    }
+
+    // Session meta
+    if (sess) {
+      const when = sess.startedAt ? new Date(sess.startedAt).toLocaleTimeString() : null;
+      const parts = [];
+      if (sess.status) parts.push(sess.status);
+      if (when) parts.push(when);
+      sessionMetaEl.textContent = parts.join(' · ');
+    } else {
+      sessionMetaEl.textContent = 'from config';
+    }
+
+    // Show configured primary if it differs
+    if (isFallback && configured) {
+      configuredEl.textContent = configured;
+      configuredRowEl.style.display = '';
+    } else {
+      configuredRowEl.style.display = 'none';
+    }
+
+    // Fallback chain from config
+    if (modelInfo.fallbacks && modelInfo.fallbacks.length) {
+      fallbacksEl.innerHTML = modelInfo.fallbacks
+        .map((f, i) => `<span class="model-live-fallback"><span class="model-live-fallback-rank">${i + 1}</span>${esc(f)}</span>`)
+        .join('');
+    } else {
+      fallbacksEl.innerHTML = '';
+    }
+  }
+}
+
+function startOpenClawUpdatePolling() {
+  if (openClawUpdatePollTimer) clearInterval(openClawUpdatePollTimer);
+  openClawUpdatePollTimer = setInterval(() => {
+    refreshOpenClawUpdateStatus(true);
+  }, 2000);
+}
+
+function ensureOpenClawUpdateOverlay() {
+  let overlay = document.getElementById('openclaw-update-overlay');
+  if (overlay) return overlay;
+
+  overlay = document.createElement('div');
+  overlay.id = 'openclaw-update-overlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.72);display:none;align-items:center;justify-content:center;z-index:9999;';
+  overlay.innerHTML = '<div style="text-align:center;color:#fff;font-size:16px;max-width:640px;padding:0 24px"><div class="spinner" style="margin:0 auto 16px;width:34px;height:34px"></div><div id="openclaw-update-overlay-msg">Updating OpenClaw…</div><div id="openclaw-update-overlay-stage" style="margin-top:10px;font-size:12px;opacity:.9"></div></div>';
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+function applyOpenClawUpdateButtonLock() {
+  const updating = !!openClawUpdateState?.inProgress;
+  const lockIds = ['btn-start', 'btn-stop', 'btn-restart', 'btn-doctor', 'btn-update-openclaw'];
+  for (const id of lockIds) {
+    const el = byId(id);
+    if (!el) continue;
+    if (updating) {
+      if (el.getAttribute('data-prev-disabled') === null) {
+        el.setAttribute('data-prev-disabled', el.disabled ? '1' : '0');
+      }
+      el.disabled = true;
+    } else {
+      const prev = el.getAttribute('data-prev-disabled');
+      if (prev === '0') el.disabled = false;
+      el.removeAttribute('data-prev-disabled');
+    }
+  }
+}
+
+function renderOpenClawUpdateStatus(state) {
+  openClawUpdateState = state || null;
+
+  const pill = byId('openclaw-update-pill');
+  const msg = byId('openclaw-update-message');
+  const meta = byId('openclaw-update-meta');
+  const log = byId('openclaw-update-log');
+  if (!pill || !msg || !meta || !log) return;
+
+  const current = state || {
+    inProgress: false,
+    stage: 'idle',
+    message: 'No update running.',
+    startedAt: null,
+    finishedAt: null,
+    error: null,
+    log: [],
+  };
+
+  const stage = current.stage || (current.inProgress ? 'updating' : 'idle');
+  pill.className = `openclaw-update-pill update-${stage}`;
+  pill.textContent = stage;
+  msg.textContent = current.message || 'No update running.';
+
+  const parts = [];
+  if (current.startedAt) parts.push(`Started: ${new Date(current.startedAt).toLocaleString()}`);
+  if (current.finishedAt) parts.push(`Finished: ${new Date(current.finishedAt).toLocaleString()}`);
+  if (current.error) parts.push(`Error: ${current.error}`);
+  meta.textContent = parts.join(' | ');
+
+  const lines = (current.log || []).slice(-8);
+  if (lines.length === 0) {
+    log.innerHTML = '<div class="openclaw-update-log-line">No update logs yet.</div>';
+  } else {
+    log.innerHTML = lines
+      .map(l => `<div class="openclaw-update-log-line">${esc(new Date(l.ts).toLocaleTimeString())} - ${esc(l.message || '')}</div>`)
+      .join('');
+  }
+
+  const overlay = ensureOpenClawUpdateOverlay();
+  const overlayMsg = byId('openclaw-update-overlay-msg');
+  const overlayStage = byId('openclaw-update-overlay-stage');
+  const cancelBtn = byId('btn-cancel-openclaw-update');
+  if (current.inProgress) {
+    overlay.style.display = 'flex';
+    if (overlayMsg) overlayMsg.textContent = current.message || 'Updating OpenClaw…';
+    if (overlayStage) overlayStage.textContent = `Stage: ${stage}`;
+    if (cancelBtn) cancelBtn.style.display = 'inline-flex';
+  } else {
+    overlay.style.display = 'none';
+    if (cancelBtn) cancelBtn.style.display = 'none';
+    const terminal = stage === 'completed' || stage === 'failed';
+    if (terminal && lastOpenClawUpdateTerminalState !== current.finishedAt) {
+      if (stage === 'completed') toast('OpenClaw update completed and gateway is online', 'success');
+      if (stage === 'failed') toast(`OpenClaw update failed: ${current.error || 'Unknown error'}`, 'error');
+      lastOpenClawUpdateTerminalState = current.finishedAt || Date.now().toString();
+    }
+  }
+
+  applyOpenClawUpdateButtonLock();
+}
+
+async function refreshOpenClawUpdateStatus(silent = false) {
+  try {
+    const r = await fetch(`/api/${activeConnId}/openclaw/update/status`, { signal: AbortSignal.timeout(4000) });
+    const data = await r.json().catch(() => null);
+    if (!r.ok || !data?.ok) {
+      if (!silent) toast(data?.error || `Update status check failed (${r.status})`, 'warning');
+      return;
+    }
+    renderOpenClawUpdateStatus(data.state || null);
+  } catch (e) {
+    if (!silent) toast(`Update status error: ${e.message}`, 'warning');
+  }
+}
+
+async function startOpenClawUpdate() {
+  const warning = 'This will stop OpenClaw, run update, and start it again. Active sessions may be interrupted. Continue?';
+  if (!confirm(warning)) return;
+
+  const btn = byId('btn-update-openclaw');
+  const orig = btn ? btn.innerHTML : null;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Updating…';
+  }
+
+  try {
+    const res = await capi('POST', '/openclaw/update');
+    if (res.ok) {
+      feedback('gateway-feedback', 'OpenClaw update started. Watch progress below.', 'success');
+      renderOpenClawUpdateStatus(res.state || { inProgress: true, stage: 'starting', message: 'Update started' });
+    } else {
+      feedback('gateway-feedback', res.error || 'OpenClaw update failed to start', 'error');
+      toast(res.error || 'OpenClaw update failed to start', 'error');
+    }
+  } catch (e) {
+    toast(`OpenClaw update error: ${e.message}`, 'error');
+    feedback('gateway-feedback', e.message, 'error');
+  }
+
+  if (btn) {
+    btn.innerHTML = orig || '⬆ Update OpenClaw';
+    btn.disabled = false;
+  }
+  refreshOpenClawUpdateStatus(true);
+}
+
+async function cancelOpenClawUpdate() {
+  if (!confirm('Cancel the current OpenClaw update and recover the gateway?')) return;
+  const btn = byId('btn-cancel-openclaw-update');
+  const orig = btn ? btn.innerHTML : null;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Cancelling…';
+  }
+
+  try {
+    const res = await capi('POST', '/openclaw/update/cancel');
+    if (res.ok) {
+      toast('OpenClaw update cancelled', 'warning');
+      feedback('gateway-feedback', 'Cancelled update and attempted gateway recovery.', 'warning');
+      renderOpenClawUpdateStatus(res.state || null);
+      refreshAll();
+    } else {
+      toast(res.error || 'Failed to cancel update', 'error');
+    }
+  } catch (e) {
+    toast(`Cancel update error: ${e.message}`, 'error');
+  }
+
+  if (btn) {
+    btn.innerHTML = orig || 'Cancel Stuck Update';
+    btn.disabled = false;
+  }
+  refreshOpenClawUpdateStatus(true);
 }
 
 // ── Health Report (Plain English) ────────────────────────────────────────────
@@ -1415,17 +1662,90 @@ async function refreshAuth() {
 
 // ── Credential Management ────────────────────────────────────────────────────
 
-const AUTH_PROVIDER_META = {
+const DEFAULT_AUTH_PROVIDER_META = {
   anthropic: { authMode: 'token', label: 'Anthropic', inputLabel: 'Setup Token', hint: 'Starts with sk-ant-...', placeholder: 'sk-ant-...' },
   openrouter: { authMode: 'api_key', label: 'OpenRouter', inputLabel: 'API Key', hint: 'Starts with sk-or-v1-...', placeholder: 'sk-or-v1-...' },
   openai: { authMode: 'api_key', label: 'OpenAI', inputLabel: 'API Key', hint: 'Starts with sk-...', placeholder: 'sk-...', oauthImport: 'codex-cli' },
   'openai-codex': { authMode: 'oauth', label: 'OpenAI Codex', inputLabel: 'OAuth', hint: '', placeholder: '', oauthImport: 'codex-cli' },
+  'github-copilot': { authMode: 'oauth', label: 'GitHub Copilot', inputLabel: 'OAuth Access Token', hint: 'Paste OAuth tokens from your provider session', placeholder: '' },
   google: { authMode: 'api_key', label: 'Google AI', inputLabel: 'API Key', hint: 'Starts with AIza...', placeholder: 'AIza...' },
   mistral: { authMode: 'api_key', label: 'Mistral', inputLabel: 'API Key', hint: '', placeholder: 'Paste API key' },
   groq: { authMode: 'api_key', label: 'Groq', inputLabel: 'API Key', hint: 'Starts with gsk_...', placeholder: 'gsk_...' },
   together: { authMode: 'api_key', label: 'Together AI', inputLabel: 'API Key', hint: '', placeholder: 'Paste API key' },
   deepseek: { authMode: 'api_key', label: 'DeepSeek', inputLabel: 'API Key', hint: 'Starts with sk-...', placeholder: 'sk-...' },
 };
+
+let AUTH_PROVIDER_META = { ...DEFAULT_AUTH_PROVIDER_META };
+
+function toProviderLabel(providerId) {
+  return String(providerId || '')
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function buildProviderMeta(providerInfo = {}) {
+  const merged = { ...DEFAULT_AUTH_PROVIDER_META };
+  for (const [provider, info] of Object.entries(providerInfo)) {
+    const base = merged[provider] || {};
+    const authMode = info?.authMode || base.authMode || 'api_key';
+    merged[provider] = {
+      authMode,
+      label: info?.label || base.label || toProviderLabel(provider) || provider,
+      inputLabel: base.inputLabel || (authMode === 'token' ? 'Setup Token' : 'API Key'),
+      hint: base.hint || '',
+      placeholder: info?.placeholder || base.placeholder || 'Paste API key',
+      ...(base.oauthImport ? { oauthImport: base.oauthImport } : {}),
+      ...(info?.oauthImport ? { oauthImport: info.oauthImport } : {}),
+    };
+  }
+  AUTH_PROVIDER_META = merged;
+  return merged;
+}
+
+function sortProvidersByLabel(providerInfo = {}) {
+  return Object.entries(providerInfo).sort((a, b) => {
+    const al = (a[1]?.label || toProviderLabel(a[0]) || a[0]).toLowerCase();
+    const bl = (b[1]?.label || toProviderLabel(b[0]) || b[0]).toLowerCase();
+    if (al === bl) return a[0].localeCompare(b[0]);
+    return al.localeCompare(bl);
+  });
+}
+
+function setProviderOptions(selectId, entries, allowProviderFn, selectedValue) {
+  const sel = byId(selectId);
+  if (!sel) return;
+  const current = selectedValue !== undefined ? selectedValue : sel.value;
+  const options = ['<option value="">Select provider…</option>'];
+  for (const [provider, info] of entries) {
+    if (allowProviderFn && !allowProviderFn(provider, info || {})) continue;
+    const label = esc(info?.label || toProviderLabel(provider) || provider);
+    options.push(`<option value="${esc(provider)}">${label}</option>`);
+  }
+  sel.innerHTML = options.join('');
+  if (current && [...sel.options].some(opt => opt.value === current)) {
+    sel.value = current;
+  }
+}
+
+function updateProviderDropdowns(providerInfo = {}) {
+  const entries = sortProvidersByLabel(providerInfo);
+  setProviderOptions('cred-provider', entries, (_provider, info) => info.authMode !== 'none');
+  setProviderOptions('add-model-provider', entries, (_provider, info) => info.authMode !== 'none');
+}
+
+async function loadProviderRegistry() {
+  try {
+    const res = await apiWithRetry('GET', '/api/providers');
+    if (!res.ok) return;
+    const providerInfo = res.providers || {};
+    buildProviderMeta(providerInfo);
+    updateProviderDropdowns(providerInfo);
+  } catch {
+    // Keep defaults if provider registry cannot be loaded.
+  }
+}
 
 function formatAuthExpiry(ts) {
   if (!ts) return '';
@@ -1446,6 +1766,8 @@ async function refreshCredentials() {
     }
 
     const providers = res.providers || {};
+    buildProviderMeta(res.providerInfo || {});
+    updateProviderDropdowns(res.providerInfo || {});
     let cards = [];
 
     for (const [provider, info] of Object.entries(providers)) {
@@ -1525,12 +1847,18 @@ function onCredProviderChange() {
   const input = byId('cred-key');
   const manualFields = byId('cred-manual-fields');
   const oauthPanel = byId('cred-oauth-panel');
+  const copilotOauthPanel = byId('cred-copilot-oauth-panel');
+  const oauthManualPanel = byId('cred-oauth-manual-panel');
   const saveBtn = byId('cred-save-btn');
   const info = AUTH_PROVIDER_META[provider];
-  const showOauthPanel = !!info?.oauthImport;
+  const isCopilotProvider = provider === 'github-copilot';
+  const showOauthPanel = !!info?.oauthImport && !isCopilotProvider;
   const oauthOnly = info?.authMode === 'oauth';
+  const showManualOauthPanel = oauthOnly && !showOauthPanel && !isCopilotProvider;
   if (manualFields) manualFields.style.display = oauthOnly ? 'none' : 'grid';
   if (oauthPanel) oauthPanel.style.display = showOauthPanel ? 'block' : 'none';
+  if (copilotOauthPanel) copilotOauthPanel.style.display = isCopilotProvider ? 'block' : 'none';
+  if (oauthManualPanel) oauthManualPanel.style.display = showManualOauthPanel ? 'block' : 'none';
   if (saveBtn) saveBtn.style.display = oauthOnly ? 'none' : 'inline-flex';
 
   if (info) {
@@ -1546,7 +1874,116 @@ function onCredProviderChange() {
     if (hint) hint.style.display = 'none';
   }
 
-  if (showOauthPanel) refreshCodexOAuthStatus(provider);
+  if (showOauthPanel && info?.oauthImport === 'codex-cli') refreshCodexOAuthStatus(provider);
+  if (isCopilotProvider) refreshGitHubCopilotOAuthStatus(true);
+}
+
+function stopCopilotOauthPolling() {
+  if (copilotOauthPollTimer) {
+    clearInterval(copilotOauthPollTimer);
+    copilotOauthPollTimer = null;
+  }
+}
+
+function startCopilotOauthPolling() {
+  stopCopilotOauthPolling();
+  copilotOauthPollTimer = setInterval(() => refreshGitHubCopilotOAuthStatus(true), 2500);
+}
+
+function renderCopilotOauthStatus(payload) {
+  const statusEl = byId('cred-copilot-oauth-status');
+  const connectBtn = byId('btn-copilot-connect');
+  if (!statusEl) return;
+
+  const auth = payload?.auth || {};
+  const state = payload?.state || {};
+
+  if (state.inProgress) {
+    statusEl.className = 'oauth-sync-status oauth-sync-status-warn';
+    statusEl.textContent = state.message || 'Waiting for GitHub Copilot login to complete…';
+    if (connectBtn) connectBtn.disabled = true;
+    startCopilotOauthPolling();
+    return;
+  }
+
+  stopCopilotOauthPolling();
+  if (connectBtn) connectBtn.disabled = false;
+
+  if (auth.connected) {
+    statusEl.className = 'oauth-sync-status oauth-sync-status-ok';
+    const parts = ['GitHub Copilot connected'];
+    if (auth.profileId) parts.push(`Profile: ${auth.profileId}`);
+    if (auth.email) parts.push(auth.email);
+    statusEl.textContent = parts.join(' | ');
+    return;
+  }
+
+  if (state.error) {
+    statusEl.className = 'oauth-sync-status oauth-sync-status-error';
+    statusEl.textContent = state.error;
+    return;
+  }
+
+  statusEl.className = 'oauth-sync-status';
+  statusEl.textContent = 'Not connected. Click Connect GitHub Copilot to start browser verification.';
+}
+
+async function refreshGitHubCopilotOAuthStatus(silent = false) {
+  const provider = byId('cred-provider')?.value;
+  if (provider !== 'github-copilot') {
+    stopCopilotOauthPolling();
+    return;
+  }
+
+  try {
+    const res = await api('GET', '/api/oauth/github-copilot/status');
+    if (!res.ok) {
+      if (!silent) feedback('cred-feedback', res.error || 'Failed to check GitHub Copilot OAuth status', 'error');
+      return;
+    }
+    renderCopilotOauthStatus(res);
+  } catch (e) {
+    if (!silent) feedback('cred-feedback', e.message, 'error');
+  }
+}
+
+async function connectGitHubCopilotOAuth() {
+  const provider = byId('cred-provider')?.value;
+  if (provider !== 'github-copilot') return;
+
+  feedback('cred-feedback', 'Launching GitHub Copilot login flow…', 'info');
+  try {
+    const res = await api('POST', '/api/oauth/github-copilot/start');
+    if (!res.ok) {
+      feedback('cred-feedback', `❌ ${res.error || 'Failed to launch login flow'}`, 'error');
+      return;
+    }
+
+    // Helpful fallback in case browser didn't auto-open from CLI flow.
+    try { window.open(res.loginUrl || 'https://github.com/login/device', '_blank', 'noopener'); } catch {}
+
+    feedback('cred-feedback', 'GitHub login flow started. Complete verification in the opened terminal/browser window.', 'success');
+    renderCopilotOauthStatus(res);
+    startCopilotOauthPolling();
+
+    const deadline = Date.now() + (10 * 60 * 1000);
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 2500));
+      const latest = await api('GET', '/api/oauth/github-copilot/status');
+      if (!latest.ok) continue;
+      renderCopilotOauthStatus(latest);
+      if (!latest.state?.inProgress) {
+        if (latest.auth?.connected) {
+          feedback('cred-feedback', '✅ GitHub Copilot connected successfully', 'success');
+          refreshCredentials();
+          refreshAuth();
+        }
+        break;
+      }
+    }
+  } catch (e) {
+    feedback('cred-feedback', `❌ Error: ${e.message}`, 'error');
+  }
 }
 
 async function saveCredential() {
@@ -1556,7 +1993,7 @@ async function saveCredential() {
 
   if (!provider) return feedback('cred-feedback', 'Please select a provider', 'error');
   if (AUTH_PROVIDER_META[provider]?.authMode === 'oauth') {
-    return feedback('cred-feedback', 'This provider uses OAuth. Use the sync button below.', 'info');
+    return feedback('cred-feedback', 'This provider uses OAuth. Use the OAuth section below (sync or manual save).', 'info');
   }
   if (!key) return feedback('cred-feedback', 'Please enter an API key or token', 'error');
 
@@ -1576,6 +2013,45 @@ async function saveCredential() {
       toast('⚠️ Gateway may need restart for new credentials to take effect. Wait for active tasks to finish first.', 'warning');
 
       // Refresh credential status
+      refreshCredentials();
+      refreshAuth();
+    } else {
+      feedback('cred-feedback', `❌ ${res.error}`, 'error');
+    }
+  } catch (e) {
+    feedback('cred-feedback', `❌ Error: ${e.message}`, 'error');
+  }
+}
+
+async function saveOAuthCredential() {
+  const provider = byId('cred-provider')?.value;
+  const profileId = byId('cred-profile-id')?.value?.trim();
+  const accessToken = byId('cred-oauth-access')?.value?.trim();
+  const refreshToken = byId('cred-oauth-refresh')?.value?.trim();
+  const expiresAt = byId('cred-oauth-expires')?.value?.trim();
+  const email = byId('cred-oauth-email')?.value?.trim();
+
+  if (!provider) return feedback('cred-feedback', 'Please select a provider', 'error');
+  if (AUTH_PROVIDER_META[provider]?.authMode !== 'oauth') return feedback('cred-feedback', 'Selected provider is not configured for OAuth', 'error');
+  if (!accessToken) return feedback('cred-feedback', 'Please enter an OAuth access token', 'error');
+
+  feedback('cred-feedback', 'Saving OAuth credential…', 'info');
+
+  try {
+    const body = { provider, accessToken };
+    if (profileId) body.profileId = profileId;
+    if (refreshToken) body.refreshToken = refreshToken;
+    if (expiresAt) body.expiresAt = expiresAt;
+    if (email) body.email = email;
+
+    const res = await api('POST', '/api/credentials/save-oauth', body);
+    if (res.ok) {
+      feedback('cred-feedback', `✅ ${res.message}`, 'success');
+      byId('cred-oauth-access').value = '';
+      byId('cred-oauth-refresh').value = '';
+      byId('cred-oauth-expires').value = '';
+      byId('cred-oauth-email').value = '';
+      if (res.warning) toast(res.warning, 'warning');
       refreshCredentials();
       refreshAuth();
     } else {
@@ -1614,7 +2090,7 @@ function checkProviderCredentials() {
       statusEl.style.background = 'rgba(248,113,113,0.06)';
       statusEl.style.border = '1px solid rgba(248,113,113,0.2)';
       statusEl.style.color = 'var(--danger)';
-      statusEl.innerHTML = `❌ <strong>No credentials found for ${esc(provider)}.</strong> You'll need to add an API key in the <a href="#" onclick="switchTab('auth'); return false;" style="color:var(--danger);text-decoration:underline">Auth tab</a> before this model can be used.`;
+      statusEl.innerHTML = `❌ <strong>No credentials found for ${esc(provider)}.</strong> You'll need to add API key or OAuth credentials in the <a href="#" onclick="switchTab('auth'); return false;" style="color:var(--danger);text-decoration:underline">Auth tab</a> before this model can be used.`;
     } else {
       statusEl.style.display = 'block';
       statusEl.className = 'cred-status-inline';
@@ -2564,9 +3040,10 @@ async function refreshSystemStats() {
 let localModelsLoaded = false;
 
 async function refreshLocalModels(force = false) {
-  if (localModelsLoaded && !force) return;
   const specsContainer = byId('system-specs');
   const listContainer = byId('local-model-list');
+  if (!specsContainer || !listContainer) return;
+  if (localModelsLoaded && !force) return;
 
   specsContainer.innerHTML = '<div class="empty-state"><span class="spinner"></span> Discovering system…</div>';
   listContainer.innerHTML = '<div class="empty-state"><span class="spinner"></span> Analyzing models…</div>';
@@ -3310,7 +3787,7 @@ async function submitRoutingProfile() {
 async function refreshCodexOAuthStatus(providerOverride) {
   const provider = providerOverride || byId('cred-provider')?.value;
   const statusEl = byId('cred-oauth-status');
-  if (!statusEl || !provider || !AUTH_PROVIDER_META[provider]?.oauthImport) return;
+  if (!statusEl || !provider || AUTH_PROVIDER_META[provider]?.oauthImport !== 'codex-cli') return;
 
   statusEl.className = 'oauth-sync-status';
   statusEl.textContent = 'Checking Codex CLI login…';
@@ -3344,7 +3821,7 @@ async function syncCodexOAuth() {
   const provider = byId('cred-provider')?.value;
   const profileId = byId('cred-profile-id')?.value?.trim();
   if (!provider) return feedback('cred-feedback', 'Please select a provider first', 'error');
-  if (!AUTH_PROVIDER_META[provider]?.oauthImport) return feedback('cred-feedback', 'This provider does not support Codex CLI OAuth sync', 'error');
+  if (AUTH_PROVIDER_META[provider]?.oauthImport !== 'codex-cli') return feedback('cred-feedback', 'This provider does not support Codex CLI OAuth sync', 'error');
 
   feedback('cred-feedback', 'Syncing OAuth from Codex CLI…', 'info');
 

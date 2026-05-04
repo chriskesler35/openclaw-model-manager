@@ -11,10 +11,9 @@
           "model": "anthropic/claude-opus-4-6"
         }
       ],
-      "primary": "anthropic/claude-opus-4-6",
+      "primary": "openai-codex/gpt-5.3-codex",
       "fallbacks": [
-        "google/gemini-2.5-pro",
-        "anthropic/claude-sonnet-4-6",
+        "google/gemini-3.1-pro-preview",
         "openrouter/auto"
       ]
     },
@@ -29,10 +28,10 @@
           "description": "Route to local when possible"
         }
       ],
-      "primary": "ollama/qwen2.5-coder:32b",
+      "primary": "ollama/glm-5:cloud",
       "fallbacks": [
-        "ollama/qwen2.5-coder:14b",
-        "anthropic/claude-opus-4-6",
+        "nemotron-3-super:cloud",
+        "openai-codex/gpt-5.3-codex",
         "openrouter/auto"
       ]
     },
@@ -51,7 +50,7 @@
           "description": "Route to local when possible"
         }
       ],
-      "primary": "anthropic/claude-sonnet-4-6",
+      "primary": "openai-codex/gpt-5.3-codex",
       "fallbacks": [
         "ollama/qwen2.5-coder:32b",
         "anthropic/claude-opus-4-6",
@@ -63,7 +62,7 @@
       "name": "Better Balance",
       "description": "Using Best the locals",
       "rules": [],
-      "primary": "anthropic/claude-opus-4-6",
+      "primary": "openai-codex/gpt-5.3-codex",
       "fallbacks": [
         "ollama/minimax-m2.7:cloud",
         "ollama/nemotron-3-super:cloud",

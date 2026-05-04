@@ -38,6 +38,7 @@ Open **http://localhost:18800** — that's it.
 
 ### 🔌 Gateway Control
 - Start / Stop / Restart the OpenClaw gateway
+- One-click OpenClaw update workflow (stop gateway -> update -> start gateway)
 - Live status indicator (green dot = running)
 - Health report in plain English
 
@@ -67,6 +68,7 @@ The server runs on port **18800** by default and binds to **0.0.0.0** (accessibl
 | Environment Variable | Default | Description |
 |---|---|---|
 | `MM_PORT` | `18800` | Server port |
+| `OPENCLAW_UPDATE_CMD` | `openclaw update` | Command used by the Update OpenClaw workflow |
 
 ```bash
 # Run on a different port

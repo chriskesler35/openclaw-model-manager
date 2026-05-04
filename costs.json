@@ -63,6 +63,267 @@
       "totalCloudTokens": 0,
       "savedByCost": 0,
       "updatedAt": "2026-03-24T21:47:29.561Z"
+    },
+    "2026-03-28": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-03-28T21:05:54.661Z"
+    },
+    "2026-03-29": {
+      "totalCost": 0.8706879,
+      "modelCosts": {
+        "claude-sonnet-4-6": {
+          "input": 6,
+          "output": 375,
+          "cacheRead": 65393,
+          "cost": 0.0252609,
+          "local": false
+        },
+        "glm-5:cloud": {
+          "input": 256329,
+          "output": 5096,
+          "cacheRead": 0,
+          "cost": 0.8454269999999999,
+          "local": false
+        }
+      },
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 261806,
+      "savedByCost": 0,
+      "updatedAt": "2026-03-29T15:20:48.619Z"
+    },
+    "2026-03-31": {
+      "totalCost": 1.237581,
+      "modelCosts": {
+        "claude-opus-4-6": {
+          "input": 3,
+          "output": 470,
+          "cacheRead": 237906,
+          "cost": 0.392154,
+          "local": false
+        },
+        "glm-5:cloud": {
+          "input": 256329,
+          "output": 5096,
+          "cacheRead": 0,
+          "cost": 0.8454269999999999,
+          "local": false
+        },
+        "claude-sonnet-4-6": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cost": 0,
+          "local": false
+        }
+      },
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 261898,
+      "savedByCost": 0,
+      "updatedAt": "2026-03-31T21:58:28.583Z"
+    },
+    "2026-04-01": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-01T13:51:07.479Z"
+    },
+    "2026-04-03": {
+      "totalCost": 4.066631999999999,
+      "modelCosts": {
+        "claude-opus-4-6": {
+          "input": 209357,
+          "output": 1078,
+          "cacheRead": 0,
+          "cost": 3.221205,
+          "local": false
+        },
+        "claude-sonnet-4-6": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cost": 0,
+          "local": false
+        },
+        "glm-5:cloud": {
+          "input": 256329,
+          "output": 5096,
+          "cacheRead": 0,
+          "cost": 0.8454269999999999,
+          "local": false
+        }
+      },
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 471860,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-03T23:34:22.365Z"
+    },
+    "2026-04-04": {
+      "totalCost": 1.2964794,
+      "modelCosts": {
+        "gpt-5.4": {
+          "input": 135692,
+          "output": 254,
+          "cacheRead": 133888,
+          "cost": 0.4510524,
+          "local": false
+        },
+        "claude-sonnet-4-6": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cost": 0,
+          "local": false
+        },
+        "glm-5:cloud": {
+          "input": 256329,
+          "output": 5096,
+          "cacheRead": 0,
+          "cost": 0.8454269999999999,
+          "local": false
+        }
+      },
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 397371,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-04T16:31:04.068Z"
+    },
+    "2026-04-05": {
+      "totalCost": 1.2964794,
+      "modelCosts": {
+        "gpt-5.4": {
+          "input": 135692,
+          "output": 254,
+          "cacheRead": 133888,
+          "cost": 0.4510524,
+          "local": false
+        },
+        "claude-sonnet-4-6": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cost": 0,
+          "local": false
+        },
+        "glm-5:cloud": {
+          "input": 256329,
+          "output": 5096,
+          "cacheRead": 0,
+          "cost": 0.8454269999999999,
+          "local": false
+        }
+      },
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 397371,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-05T18:10:12.646Z"
+    },
+    "2026-04-07": {
+      "totalCost": 0.8559672,
+      "modelCosts": {
+        "gpt-5.4": {
+          "input": 351,
+          "output": 164,
+          "cacheRead": 23424,
+          "cost": 0.010540200000000001,
+          "local": false
+        },
+        "claude-sonnet-4-6": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cost": 0,
+          "local": false
+        },
+        "glm-5:cloud": {
+          "input": 256329,
+          "output": 5096,
+          "cacheRead": 0,
+          "cost": 0.8454269999999999,
+          "local": false
+        }
+      },
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 261940,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-07T18:51:54.426Z"
+    },
+    "2026-04-11": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-11T02:21:40.481Z"
+    },
+    "2026-04-12": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-12T03:16:41.294Z"
+    },
+    "2026-04-16": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-16T13:34:09.179Z"
+    },
+    "2026-04-19": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-19T21:25:01.439Z"
+    },
+    "2026-04-21": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-21T19:17:51.776Z"
+    },
+    "2026-04-25": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-25T00:59:41.615Z"
+    },
+    "2026-04-27": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-27T17:27:23.763Z"
+    },
+    "2026-04-28": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-04-28T17:09:23.212Z"
+    },
+    "2026-05-03": {
+      "totalCost": 0,
+      "modelCosts": {},
+      "totalLocalTokens": 0,
+      "totalCloudTokens": 0,
+      "savedByCost": 0,
+      "updatedAt": "2026-05-03T22:25:27.243Z"
     }
   }
 }

@@ -100,6 +100,10 @@ function run(cmd, timeoutMs = 30000) {
   });
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function tryJsonParse(str) {
   try { return JSON.parse(str); } catch { return null; }
 }
@@ -279,6 +283,37 @@ async function httpHealthCheck(conn) {
   }
 }
 
+async function fetchLocalGatewayHealth(port, opts = {}) {
+  const attempts = Number.isInteger(opts.attempts) ? Math.max(1, opts.attempts) : 2;
+  const timeoutMs = Number.isInteger(opts.timeoutMs) ? Math.max(1000, opts.timeoutMs) : 5000;
+  const retryDelayMs = Number.isInteger(opts.retryDelayMs) ? Math.max(0, opts.retryDelayMs) : 250;
+
+  let lastError = null;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      const body = await r.json().catch(() => null);
+      if (r.ok) {
+        return { ok: true, status: r.status, body };
+      }
+      lastError = new Error(`HTTP ${r.status}`);
+    } catch (e) {
+      clearTimeout(timer);
+      lastError = e;
+    }
+
+    if (attempt < attempts - 1 && retryDelayMs > 0) {
+      await sleep(retryDelayMs);
+    }
+  }
+
+  return { ok: false, error: lastError?.message || 'Gateway health probe failed' };
+}
+
 // Build CLI flags for remote gateway commands
 function remoteFlags(conn) {
   let flags = '';
@@ -383,15 +418,15 @@ app.get('/api/connections/:id/health', asyncHandler(async (req, res) => {
     // Use HTTP /health instead of shelling out to `openclaw gateway status --json`
     // to avoid WS probe spam in gateway logs
     const port = conn.port || 18789;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
-      clearTimeout(timer);
-      const body = await r.json().catch(() => null);
-      res.json({ ok: true, status: { running: r.ok, rpc: { ok: r.ok }, port: { status: 'busy' }, gateway: { bindHost: '127.0.0.1', port }, ...(body || {}) }, rpcConsecutiveFailures: consecutiveFailures });
+      const health = await fetchLocalGatewayHealth(port, { attempts: 2, timeoutMs: 5000, retryDelayMs: 250 });
+      if (health.ok) {
+        const body = health.body || null;
+        res.json({ ok: true, status: { running: true, rpc: { ok: true }, port: { status: 'busy' }, gateway: { bindHost: '127.0.0.1', port }, ...(body || {}) }, rpcConsecutiveFailures: consecutiveFailures });
+      } else {
+        res.json({ ok: true, status: { running: false, error: health.error || 'Gateway health probe failed' }, rpcConsecutiveFailures: consecutiveFailures });
+      }
     } catch (e) {
-      clearTimeout(timer);
       res.json({ ok: true, status: { running: false, error: e.message }, rpcConsecutiveFailures: consecutiveFailures });
     }
     return;
@@ -461,6 +496,268 @@ app.get('/api/:connId/doctor/run', async (req, res) => {
 
 // ── Gateway Control (connection-aware) ───────────────────────────────────────
 
+const openClawUpdateState = {
+  inProgress: false,
+  connId: null,
+  stage: 'idle',
+  message: 'No update running',
+  startedAt: null,
+  finishedAt: null,
+  error: null,
+  updateOutput: null,
+  log: [],
+};
+
+function appendOpenClawUpdateLog(message) {
+  if (!message) return;
+  openClawUpdateState.log.push({
+    ts: new Date().toISOString(),
+    message,
+  });
+  if (openClawUpdateState.log.length > 120) {
+    openClawUpdateState.log = openClawUpdateState.log.slice(-120);
+  }
+}
+
+function setOpenClawUpdateState(patch) {
+  Object.assign(openClawUpdateState, patch);
+  if (patch.message) {
+    appendOpenClawUpdateLog(patch.message);
+    mmLog('info', `[openclaw-update] ${patch.message}`, {
+      stage: openClawUpdateState.stage,
+      connId: openClawUpdateState.connId,
+    });
+  }
+}
+
+function getUpdateElapsedMs() {
+  if (!openClawUpdateState.startedAt) return 0;
+  const started = Date.parse(openClawUpdateState.startedAt);
+  if (Number.isNaN(started)) return 0;
+  return Date.now() - started;
+}
+
+async function findOpenClawUpdateProcesses() {
+  const script = [
+    "$procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'openclaw\\s+update' } | Select-Object -ExpandProperty ProcessId",
+    "if ($procs) { $procs -join ',' }",
+  ].join('; ');
+  const raw = await run(script, 10000).catch(() => '');
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map(x => parseInt(String(x).trim(), 10))
+    .filter(n => Number.isInteger(n) && n > 0);
+}
+
+async function killOpenClawUpdateProcesses() {
+  const pids = await findOpenClawUpdateProcesses();
+  for (const pid of pids) {
+    try {
+      await run(`Stop-Process -Id ${pid} -Force`, 10000);
+      appendOpenClawUpdateLog(`Stopped stuck updater process ${pid}`);
+    } catch {}
+  }
+  return pids;
+}
+
+async function waitForGatewayPortToClose(port, maxAttempts = 20, waitMs = 1000) {
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleep(waitMs);
+    try {
+      const check = await run(`cmd /c netstat -ano | findstr ":${port}.*LISTENING"`, 3000);
+      if (!check || !check.trim()) return true;
+    } catch {
+      // findstr exits non-zero when no match => port is free
+      return true;
+    }
+  }
+  return false;
+}
+
+async function waitForGatewayHealth(port, maxAttempts = 30, waitMs = 2000) {
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleep(waitMs);
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      if (r.ok) return true;
+    } catch {}
+  }
+  return false;
+}
+
+app.get('/api/:connId/openclaw/update/status', asyncHandler(async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
+
+  if (conn.type !== 'local') {
+    try {
+      const remote = await remoteMMProxy(conn, '/api/local/openclaw/update/status');
+      return res.json({ ok: true, state: remote.state || remote });
+    } catch (e) {
+      return apiError(res, 501, 'NOT_IMPLEMENTED', 'Remote update status is not available on this host', {
+        hint: 'Update the Model Manager on the remote host to use remote OpenClaw update orchestration.',
+        reason: e.message,
+      });
+    }
+  }
+
+  if (openClawUpdateState.inProgress) {
+    const maxUpdateMs = parseInt(process.env.OPENCLAW_UPDATE_MAX_MS || '', 10) || (20 * 60 * 1000);
+    const elapsed = getUpdateElapsedMs();
+    if (elapsed > maxUpdateMs) {
+      setOpenClawUpdateState({
+        inProgress: false,
+        stage: 'failed',
+        message: 'Update timed out waiting for completion',
+        finishedAt: new Date().toISOString(),
+        error: `Update exceeded max runtime (${Math.round(maxUpdateMs / 1000)}s)`,
+      });
+      try {
+        await run('cmd /c schtasks /Run /TN "OpenClaw Gateway"', 10000);
+      } catch {}
+    }
+  }
+
+  res.json({ ok: true, state: openClawUpdateState });
+}));
+
+app.post('/api/:connId/openclaw/update/cancel', asyncHandler(async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
+
+  if (conn.type !== 'local') {
+    try {
+      const remote = await remoteMMProxy(conn, '/api/local/openclaw/update/cancel', 'POST');
+      return res.json(remote);
+    } catch (e) {
+      return apiError(res, 501, 'NOT_IMPLEMENTED', 'Remote update cancel is not available on this host', {
+        hint: 'Update the Model Manager on the remote host to support update cancel orchestration.',
+        reason: e.message,
+      });
+    }
+  }
+
+  if (!openClawUpdateState.inProgress) {
+    return res.json({ ok: true, message: 'No active OpenClaw update to cancel', killedPids: [], state: openClawUpdateState });
+  }
+
+  const killed = await killOpenClawUpdateProcesses();
+  try {
+    await run('cmd /c schtasks /Run /TN "OpenClaw Gateway"', 10000);
+  } catch {}
+
+  setOpenClawUpdateState({
+    inProgress: false,
+    stage: 'failed',
+    message: 'OpenClaw update cancelled by operator',
+    finishedAt: new Date().toISOString(),
+    error: killed.length ? `Cancelled and stopped ${killed.length} updater process(es)` : 'Cancelled',
+  });
+
+  res.json({ ok: true, message: 'OpenClaw update cancelled', killedPids: killed, state: openClawUpdateState });
+}));
+
+app.post('/api/:connId/openclaw/update', asyncHandler(async (req, res) => {
+  const conn = getConnection(req.params.connId);
+  if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
+
+  if (conn.type !== 'local') {
+    try {
+      const remote = await remoteMMProxy(conn, '/api/local/openclaw/update', 'POST');
+      return res.json(remote);
+    } catch (e) {
+      return apiError(res, 501, 'NOT_IMPLEMENTED', 'Remote update is not available on this host', {
+        hint: 'Update the Model Manager on the remote host to support update orchestration.',
+        reason: e.message,
+      });
+    }
+  }
+
+  if (openClawUpdateState.inProgress) {
+    return apiError(res, 409, 'CONFLICT', 'An OpenClaw update is already in progress', { state: openClawUpdateState });
+  }
+
+  const gatewayTaskName = 'OpenClaw Gateway';
+  const gwPort = conn.port || 18789;
+  const updateCmd = process.env.OPENCLAW_UPDATE_CMD || 'openclaw update --yes --json';
+  const updateTimeoutMs = parseInt(process.env.OPENCLAW_UPDATE_TIMEOUT_MS || '', 10) || (20 * 60 * 1000);
+
+  setOpenClawUpdateState({
+    inProgress: true,
+    connId: conn.id,
+    stage: 'starting',
+    message: 'Preparing OpenClaw update workflow',
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    error: null,
+    updateOutput: null,
+    log: [],
+  });
+
+  res.status(202).json({ ok: true, message: 'OpenClaw update started', state: openClawUpdateState });
+
+  (async () => {
+    try {
+      setOpenClawUpdateState({ stage: 'stopping', message: 'Stopping OpenClaw gateway task' });
+      try {
+        await run(`cmd /c schtasks /End /TN "${gatewayTaskName}"`, 10000);
+      } catch {
+        appendOpenClawUpdateLog('Gateway task was not running or already stopped');
+      }
+
+      const portFreed = await waitForGatewayPortToClose(gwPort, 25, 1000);
+      if (!portFreed) {
+        throw new Error(`Gateway port ${gwPort} did not close in time`);
+      }
+
+      await sleep(1500);
+
+      setOpenClawUpdateState({ stage: 'updating', message: `Running update command: ${updateCmd}` });
+      const updateOutput = await run(updateCmd, updateTimeoutMs);
+
+      setOpenClawUpdateState({
+        stage: 'starting',
+        message: 'Starting OpenClaw gateway task',
+        updateOutput: updateOutput ? updateOutput.slice(-6000) : null,
+      });
+      await run(`cmd /c schtasks /Run /TN "${gatewayTaskName}"`, 10000);
+
+      setOpenClawUpdateState({ stage: 'verifying', message: 'Verifying gateway is healthy after update' });
+      const online = await waitForGatewayHealth(gwPort, 30, 2000);
+      if (!online) {
+        throw new Error('Update finished, but gateway health did not return in time');
+      }
+
+      setOpenClawUpdateState({
+        inProgress: false,
+        stage: 'completed',
+        message: 'OpenClaw update completed and gateway is back online',
+        finishedAt: new Date().toISOString(),
+        error: null,
+      });
+    } catch (e) {
+      setOpenClawUpdateState({ stage: 'recovering', message: 'Update failed, attempting to bring gateway back up' });
+      try {
+        await run(`cmd /c schtasks /Run /TN "${gatewayTaskName}"`, 10000);
+        await waitForGatewayHealth(gwPort, 15, 2000);
+      } catch {}
+
+      setOpenClawUpdateState({
+        inProgress: false,
+        stage: 'failed',
+        message: `OpenClaw update failed: ${e.message}`,
+        finishedAt: new Date().toISOString(),
+        error: e.message,
+      });
+      mmLog('error', 'OpenClaw update workflow failed', { error: e.message, connId: conn.id });
+    }
+  })();
+}));
+
 app.get('/api/:connId/gateway/status', asyncHandler(async (req, res) => {
   const conn = getConnection(req.params.connId);
   if (!conn) return apiError(res, 404, 'NOT_FOUND', 'Connection not found');
@@ -469,15 +766,15 @@ app.get('/api/:connId/gateway/status', asyncHandler(async (req, res) => {
     // Use HTTP /health instead of shelling out to `openclaw gateway status --json`
     // to avoid WS probe spam in gateway logs
     const port = conn.port || 18789;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
-      clearTimeout(timer);
-      const body = await r.json().catch(() => null);
-      res.json({ ok: true, status: { running: r.ok, rpc: { ok: r.ok }, port: { status: 'busy' }, gateway: { bindHost: '127.0.0.1', port }, ...(body || {}) } });
+      const health = await fetchLocalGatewayHealth(port, { attempts: 2, timeoutMs: 5000, retryDelayMs: 250 });
+      if (health.ok) {
+        const body = health.body || null;
+        res.json({ ok: true, status: { running: true, rpc: { ok: true }, port: { status: 'busy' }, gateway: { bindHost: '127.0.0.1', port }, ...(body || {}) } });
+      } else {
+        res.json({ ok: true, status: { running: false, error: health.error || 'Gateway health probe failed' } });
+      }
     } catch (e) {
-      clearTimeout(timer);
       res.json({ ok: true, status: { running: false, error: e.message } });
     }
   } else {
@@ -1799,7 +2096,32 @@ app.get('/api/:connId/system/local-models', asyncHandler(async (req, res) => {
 
 const OPENCLAW_CONFIG = path.join(process.env.USERPROFILE || process.env.HOME, '.openclaw', 'openclaw.json');
 const AUTH_PROFILES = path.join(process.env.USERPROFILE || process.env.HOME, '.openclaw', 'agents', 'main', 'agent', 'auth-profiles.json');
+const SESSIONS_JSON = path.join(process.env.USERPROFILE || process.env.HOME, '.openclaw', 'agents', 'main', 'sessions', 'sessions.json');
 const CODEX_AUTH = path.join(process.env.USERPROFILE || process.env.HOME, '.codex', 'auth.json');
+
+/**
+ * Read the currently active (or most recently used) model from sessions.json.
+ * Returns { model, provider, sessionKey, status, startedAt, isActive }
+ */
+function readCurrentSessionModel() {
+  try {
+    const sessions = readJsonFile(SESSIONS_JSON);
+    if (!sessions) return null;
+    const entries = Object.entries(sessions).map(([key, val]) => ({ key, ...val }));
+    if (!entries.length) return null;
+    // Prefer any currently running session
+    const running = entries.filter(e => e.status === 'running' || e.status === 'active');
+    if (running.length) {
+      const r = running.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0];
+      return { model: r.model, provider: r.modelProvider, sessionKey: r.key, status: r.status, startedAt: r.startedAt, isActive: true };
+    }
+    // Otherwise return the most recently started session (agent:main:main preferred)
+    const mainSession = entries.find(e => e.key === 'agent:main:main');
+    const recent = entries.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0];
+    const best = mainSession && (!recent || (mainSession.startedAt || 0) >= ((recent.startedAt || 0) - 60000)) ? mainSession : recent;
+    return { model: best.model, provider: best.modelProvider, sessionKey: best.key, status: best.status, startedAt: best.startedAt, isActive: false };
+  } catch { return null; }
+}
 
 function readJsonFile(filePath) {
   try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch { return null; }
@@ -1815,6 +2137,7 @@ const KNOWN_PROVIDERS = {
   openrouter: { authMode: 'api_key', label: 'OpenRouter', keyPrefix: 'sk-or-', placeholder: 'sk-or-v1-...' },
   openai: { authMode: 'api_key', label: 'OpenAI', keyPrefix: 'sk-', placeholder: 'sk-...', oauthImport: 'codex-cli' },
   'openai-codex': { authMode: 'oauth', label: 'OpenAI Codex', keyPrefix: '', placeholder: '', oauthImport: 'codex-cli' },
+  'github-copilot': { authMode: 'oauth', label: 'GitHub Copilot', keyPrefix: '', placeholder: '' },
   google: { authMode: 'api_key', label: 'Google AI', keyPrefix: 'AI', placeholder: 'AIza...' },
   mistral: { authMode: 'api_key', label: 'Mistral', keyPrefix: '', placeholder: 'API key' },
   groq: { authMode: 'api_key', label: 'Groq', keyPrefix: 'gsk_', placeholder: 'gsk_...' },
@@ -1822,6 +2145,44 @@ const KNOWN_PROVIDERS = {
   deepseek: { authMode: 'api_key', label: 'DeepSeek', keyPrefix: 'sk-', placeholder: 'sk-...' },
   ollama: { authMode: 'none', label: 'Ollama (Local)', keyPrefix: '', placeholder: '' },
 };
+
+function toProviderLabel(providerId) {
+  return String(providerId || '')
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function buildProviderRegistry() {
+  const providers = { ...KNOWN_PROVIDERS };
+  const config = readJsonFile(OPENCLAW_CONFIG) || {};
+  const authProfiles = readJsonFile(AUTH_PROFILES) || {};
+  const discovered = new Set();
+
+  for (const provider of Object.keys(config.models?.providers || {})) discovered.add(provider);
+
+  for (const profile of Object.values(config.auth?.profiles || {})) {
+    if (profile?.provider) discovered.add(profile.provider);
+  }
+
+  for (const profile of Object.values(authProfiles.profiles || {})) {
+    if (profile?.provider) discovered.add(profile.provider);
+  }
+
+  for (const provider of discovered) {
+    if (!providers[provider]) {
+      providers[provider] = {
+        authMode: 'api_key',
+        label: toProviderLabel(provider) || provider,
+        keyPrefix: '',
+        placeholder: 'API key',
+      };
+    }
+  }
+
+  return providers;
+}
 
 function decodeJwtPayload(token) {
   if (typeof token !== 'string' || token.split('.').length < 2) return null;
@@ -1862,10 +2223,82 @@ function readCodexAuthSummary() {
   };
 }
 
+const githubCopilotOauthState = {
+  inProgress: false,
+  startedAt: null,
+  finishedAt: null,
+  message: 'Not connected',
+  error: null,
+  profileId: null,
+};
+
+function getGitHubCopilotAuthStatus() {
+  const authProfiles = readJsonFile(AUTH_PROFILES) || { profiles: {}, lastGood: {} };
+  const config = readJsonFile(OPENCLAW_CONFIG) || {};
+
+  const matches = getProviderAuthProfiles(authProfiles, 'github-copilot')
+    .filter(({ profile }) => hasUsableProviderCredential(profile));
+
+  if (matches.length === 0) {
+    return { connected: false, profileId: null, email: null, expires: null, profileCount: 0 };
+  }
+
+  const preferredId = authProfiles.lastGood?.['github-copilot']
+    && matches.find(({ profileId }) => profileId === authProfiles.lastGood['github-copilot'])
+    ? authProfiles.lastGood['github-copilot']
+    : matches[0].profileId;
+
+  const preferred = matches.find(({ profileId }) => profileId === preferredId) || matches[0];
+
+  // Keep OpenClaw config in sync with the login profile so model routing can use it immediately.
+  const link = linkProviderAuthIntoConfig(config, authProfiles, 'github-copilot');
+  if (link.linked) {
+    writeJsonFile(OPENCLAW_CONFIG, config);
+  }
+
+  return {
+    connected: true,
+    profileId: preferred.profileId,
+    email: preferred.profile?.email || null,
+    expires: preferred.profile?.expires || null,
+    profileCount: matches.length,
+  };
+}
+
 function ensureProviderConfigEntry(config, provider, profileId, mode, extra = {}) {
   if (!config.auth) config.auth = { profiles: {} };
   if (!config.auth.profiles) config.auth.profiles = {};
   config.auth.profiles[profileId] = { provider, mode, ...extra };
+}
+
+function getProviderAuthProfiles(authProfiles, provider) {
+  return Object.entries(authProfiles?.profiles || {})
+    .filter(([, p]) => p?.provider === provider)
+    .map(([profileId, profile]) => ({ profileId, profile }));
+}
+
+function hasUsableProviderCredential(profile) {
+  return !!(profile?.token || profile?.key || profile?.apiKey || profile?.access);
+}
+
+function linkProviderAuthIntoConfig(config, authProfiles, provider) {
+  if (provider === 'ollama') return { linked: false };
+
+  const matches = getProviderAuthProfiles(authProfiles, provider)
+    .filter(({ profile }) => hasUsableProviderCredential(profile));
+  if (matches.length === 0) return { linked: false };
+
+  const preferredId = authProfiles?.lastGood?.[provider]
+    && matches.find(({ profileId }) => profileId === authProfiles.lastGood[provider])
+    ? authProfiles.lastGood[provider]
+    : matches[0].profileId;
+
+  const preferred = matches.find(({ profileId }) => profileId === preferredId) || matches[0];
+  const mode = preferred.profile?.type || 'api_key';
+  const extra = preferred.profile?.email ? { email: preferred.profile.email } : {};
+
+  ensureProviderConfigEntry(config, provider, preferred.profileId, mode, extra);
+  return { linked: true, profileId: preferred.profileId, mode };
 }
 
 function upsertOauthProfile({ provider, profileId, access, refresh, expires, email, accountId }) {
@@ -1893,12 +2326,14 @@ function upsertOauthProfile({ provider, profileId, access, refresh, expires, ema
 
 // GET known providers list
 app.get('/api/providers', (req, res) => {
-  res.json({ ok: true, providers: KNOWN_PROVIDERS });
+  const providers = buildProviderRegistry();
+  res.json({ ok: true, providers });
 });
 
 // GET current auth credentials status (no secrets exposed)
 app.get('/api/credentials/status', asyncHandler(async (req, res) => {
   try {
+    const providerRegistry = buildProviderRegistry();
     const config = readJsonFile(OPENCLAW_CONFIG);
     const authProfiles = readJsonFile(AUTH_PROFILES);
     if (!config || !authProfiles) {
@@ -1947,17 +2382,22 @@ app.get('/api/credentials/status', asyncHandler(async (req, res) => {
     }
 
     for (const provider of Object.keys(providers)) {
-      providers[provider].providerInfo = KNOWN_PROVIDERS[provider] || null;
+      providers[provider].providerInfo = providerRegistry[provider] || null;
     }
     for (const provider of ['openai', 'openai-codex']) {
-      providers[provider] = providers[provider] || { profiles: [], hasCredentials: false, providerInfo: KNOWN_PROVIDERS[provider] || null };
-      providers[provider].providerInfo = KNOWN_PROVIDERS[provider] || null;
+      providers[provider] = providers[provider] || { profiles: [], hasCredentials: false, providerInfo: providerRegistry[provider] || null };
+      providers[provider].providerInfo = providerRegistry[provider] || null;
+    }
+
+    for (const provider of Object.keys(providerRegistry)) {
+      providers[provider] = providers[provider] || { profiles: [], hasCredentials: false, providerInfo: providerRegistry[provider] || null };
+      providers[provider].providerInfo = providerRegistry[provider] || null;
     }
 
     const codexAuth = readCodexAuthSummary();
     if (codexAuth.ok) {
       for (const provider of ['openai', 'openai-codex']) {
-        providers[provider] = providers[provider] || { profiles: [], hasCredentials: false, providerInfo: KNOWN_PROVIDERS[provider] };
+        providers[provider] = providers[provider] || { profiles: [], hasCredentials: false, providerInfo: providerRegistry[provider] };
         providers[provider].oauthSource = {
           source: 'codex-cli',
           loggedIn: !!(codexAuth.hasAccessToken && codexAuth.hasRefreshToken),
@@ -1968,7 +2408,7 @@ app.get('/api/credentials/status', asyncHandler(async (req, res) => {
       }
     }
 
-    res.json({ ok: true, providers, providerInfo: KNOWN_PROVIDERS });
+    res.json({ ok: true, providers, providerInfo: providerRegistry });
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
@@ -2028,6 +2468,73 @@ app.post('/api/oauth/codex/import', asyncHandler(async (req, res) => {
   }
 }));
 
+app.get('/api/oauth/github-copilot/status', asyncHandler(async (_req, res) => {
+  const auth = getGitHubCopilotAuthStatus();
+
+  if (githubCopilotOauthState.inProgress) {
+    const started = githubCopilotOauthState.startedAt ? Date.parse(githubCopilotOauthState.startedAt) : 0;
+    const elapsedMs = started > 0 ? (Date.now() - started) : 0;
+    const maxMs = parseInt(process.env.COPILOT_OAUTH_MAX_MS || '', 10) || (10 * 60 * 1000);
+
+    if (auth.connected) {
+      githubCopilotOauthState.inProgress = false;
+      githubCopilotOauthState.finishedAt = new Date().toISOString();
+      githubCopilotOauthState.message = 'GitHub Copilot connected successfully';
+      githubCopilotOauthState.error = null;
+      githubCopilotOauthState.profileId = auth.profileId;
+      mmLog('info', 'GitHub Copilot OAuth connected', { profileId: auth.profileId });
+    } else if (elapsedMs > maxMs) {
+      githubCopilotOauthState.inProgress = false;
+      githubCopilotOauthState.finishedAt = new Date().toISOString();
+      githubCopilotOauthState.message = 'GitHub Copilot login timed out';
+      githubCopilotOauthState.error = 'Login window timed out before credentials were detected';
+      mmLog('warn', 'GitHub Copilot OAuth timed out');
+    }
+  }
+
+  res.json({
+    ok: true,
+    source: 'github-copilot-device-flow',
+    auth,
+    state: githubCopilotOauthState,
+    loginUrl: 'https://github.com/login/device',
+  });
+}));
+
+app.post('/api/oauth/github-copilot/start', asyncHandler(async (_req, res) => {
+  if (githubCopilotOauthState.inProgress) {
+    return apiError(res, 409, 'CONFLICT', 'GitHub Copilot OAuth login is already in progress');
+  }
+
+  const cmd = process.env.OPENCLAW_COPILOT_LOGIN_CMD || 'openclaw models auth login-github-copilot';
+
+  githubCopilotOauthState.inProgress = true;
+  githubCopilotOauthState.startedAt = new Date().toISOString();
+  githubCopilotOauthState.finishedAt = null;
+  githubCopilotOauthState.message = 'Launching GitHub Copilot login flow in a new terminal window';
+  githubCopilotOauthState.error = null;
+  githubCopilotOauthState.profileId = null;
+
+  try {
+    // This command requires a TTY. Launch it in a dedicated terminal window.
+    await run(`cmd /c start "" cmd /c "${cmd}"`, 10000);
+    mmLog('info', 'GitHub Copilot OAuth flow launched', { cmd });
+    res.json({
+      ok: true,
+      message: 'GitHub Copilot login flow started. Complete sign-in in the opened terminal/browser window.',
+      state: githubCopilotOauthState,
+      loginUrl: 'https://github.com/login/device',
+    });
+  } catch (e) {
+    githubCopilotOauthState.inProgress = false;
+    githubCopilotOauthState.finishedAt = new Date().toISOString();
+    githubCopilotOauthState.message = 'Failed to launch GitHub Copilot login flow';
+    githubCopilotOauthState.error = e.message;
+    mmLog('error', 'GitHub Copilot OAuth launch failed', { error: e.message });
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
+  }
+}));
+
 function maskKey(key) {
   if (!key || key.length < 8) return '••••••••';
   return key.substring(0, 6) + '••••••' + key.substring(key.length - 4);
@@ -2044,15 +2551,18 @@ app.post('/api/credentials/save', asyncHandler(async (req, res) => {
       return apiError(res, 400, 'VALIDATION_ERROR', 'API key must be a string of at least 8 characters');
     }
 
-    const provInfo = KNOWN_PROVIDERS[provider];
-    if (!provInfo) {
-      return apiError(res, 400, 'VALIDATION_ERROR', `Unknown provider: ${provider}. Supported: ${Object.keys(KNOWN_PROVIDERS).join(', ')}`);
-    }
+    const providerRegistry = buildProviderRegistry();
+    const provInfo = providerRegistry[provider] || {
+      authMode: 'api_key',
+      label: toProviderLabel(provider) || provider,
+      keyPrefix: '',
+      placeholder: 'API key',
+    };
     if (provInfo.authMode === 'none') {
       return apiError(res, 400, 'VALIDATION_ERROR', `${provInfo.label} does not require credentials`);
     }
     if (provInfo.authMode === 'oauth') {
-      return apiError(res, 400, 'VALIDATION_ERROR', `${provInfo.label} uses OAuth. Use the OAuth sync action instead of pasting a key.`);
+      return apiError(res, 400, 'VALIDATION_ERROR', `${provInfo.label} uses OAuth. Use the OAuth sync/manual action instead of pasting a key.`);
     }
 
     // Use CLI paste-token for safety (handles config updates properly)
@@ -2089,6 +2599,66 @@ app.post('/api/credentials/save', asyncHandler(async (req, res) => {
       message: `Credentials saved for ${provInfo.label}`,
       warning: 'The gateway may need to be restarted for changes to take effect. If a conversation is active, wait until it completes before restarting.',
       profileId: customProfileId || `${provider}:default`,
+    });
+  } catch (e) {
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
+  }
+}));
+
+// POST add/update OAuth credentials for a provider (manual import)
+app.post('/api/credentials/save-oauth', asyncHandler(async (req, res) => {
+  try {
+    const { provider, accessToken, refreshToken, email, accountId, profileId: customProfileId, expiresAt } = req.body || {};
+
+    if (!validate.isNonEmptyString(provider)) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'provider is required and must be a non-empty string');
+    }
+    if (!validate.isValidApiKey(accessToken || '')) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'accessToken must be a string of at least 8 characters');
+    }
+
+    const providerRegistry = buildProviderRegistry();
+    const provInfo = providerRegistry[provider] || {
+      authMode: 'oauth',
+      label: toProviderLabel(provider) || provider,
+      keyPrefix: '',
+      placeholder: '',
+    };
+
+    if (provInfo.authMode === 'none') {
+      return apiError(res, 400, 'VALIDATION_ERROR', `${provInfo.label} does not require credentials`);
+    }
+
+    const parsedExpiry = expiresAt
+      ? (Number.isFinite(Number(expiresAt))
+          ? Number(expiresAt)
+          : (() => {
+              const parsed = Date.parse(String(expiresAt));
+              return Number.isNaN(parsed) ? null : parsed;
+            })())
+      : null;
+
+    if (expiresAt && !parsedExpiry) {
+      return apiError(res, 400, 'VALIDATION_ERROR', 'expiresAt must be an epoch milliseconds value or ISO datetime string');
+    }
+
+    const profileId = customProfileId || `${provider}:default`;
+    const result = upsertOauthProfile({
+      provider,
+      profileId,
+      access: accessToken,
+      refresh: refreshToken || null,
+      expires: parsedExpiry,
+      email: email || null,
+      accountId: accountId || null,
+    });
+
+    mmLog('info', 'Saved manual OAuth credentials', { provider, profileId, email: email || null });
+    res.json({
+      ok: true,
+      message: `OAuth credentials saved for ${provInfo.label}`,
+      profileId: result.profileId,
+      warning: 'If the gateway is already running, restart it after active work finishes so the new auth state is picked up.',
     });
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
@@ -2153,10 +2723,17 @@ app.post('/api/models/add', asyncHandler(async (req, res) => {
 
     writeJsonFile(OPENCLAW_CONFIG, config);
 
-    // Check if provider has credentials
+    // Check if provider has credentials and ensure matching auth profile is linked in config.
     const authProfiles = readJsonFile(AUTH_PROFILES);
     const providerProfiles = Object.values(authProfiles?.profiles || {}).filter(p => p.provider === provider);
-    const hasCredentials = provider === 'ollama' || providerProfiles.some(p => p.token || p.key || p.apiKey);
+    const hasCredentials = provider === 'ollama' || providerProfiles.some(p => hasUsableProviderCredential(p));
+
+    if (hasCredentials && provider !== 'ollama') {
+      // Keep OpenClaw auth profile references in sync for providers using OAuth (e.g. github-copilot)
+      // or API keys, so added models can authenticate immediately.
+      linkProviderAuthIntoConfig(config, authProfiles || {}, provider);
+      writeJsonFile(OPENCLAW_CONFIG, config);
+    }
 
     const result = {
       ok: true,
@@ -2166,7 +2743,7 @@ app.post('/api/models/add', asyncHandler(async (req, res) => {
     };
 
     if (!hasCredentials && provider !== 'ollama') {
-      result.credentialWarning = `⚠️ No API credentials found for ${provider}. You'll need to add an API key before this model can be used.`;
+      result.credentialWarning = `⚠️ No credentials found for ${provider}. Add API key or OAuth credentials in the Auth tab before this model can be used.`;
       result.needsCredentials = true;
     }
 
@@ -2864,6 +3441,8 @@ function syncProfileToOpenClawConfig(profile) {
   config.agents = config.agents || {};
   config.agents.defaults = config.agents.defaults || {};
   config.agents.defaults.model = config.agents.defaults.model || {};
+  // OpenClaw reads `model.primary` as the active model. Keep `id` in sync for older configs.
+  config.agents.defaults.model.primary = profile.primary;
   config.agents.defaults.model.id = profile.primary;
   config.agents.defaults.model.fallbacks = profile.fallbacks;
   writeJsonFile(OPENCLAW_CONFIG, config);
@@ -3553,22 +4132,26 @@ function broadcastStatus() {
         // Use HTTP /health endpoint instead of raw WS connect/disconnect
         // (WS probe causes "closed before connect" spam in gateway logs)
         const port = conn.port || 18789;
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 3000);
-
-        fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
-          .then(r => {
-            clearTimeout(timer);
+        fetchLocalGatewayHealth(port, { attempts: 2, timeoutMs: 4000, retryDelayMs: 200 })
+          .then(health => {
+            if (!health.ok) throw new Error(health.error || 'Gateway health probe failed');
+            const ocConfig = readJsonFile(OPENCLAW_CONFIG);
+            const modelCfg = ocConfig?.agents?.defaults?.model || {};
+            const sessionModel = readCurrentSessionModel();
+            const modelInfo = {
+              primary: modelCfg.primary || null,
+              fallbacks: modelCfg.fallbacks || [],
+              session: sessionModel
+            };
             const payload = JSON.stringify({
               type: 'gateway-status', connId: conn.id,
-              data: { running: r.ok, rpc: { ok: r.ok }, port: { status: 'busy' }, gateway: { bindHost: '0.0.0.0', port } }
+              data: { running: true, rpc: { ok: true }, port: { status: 'busy' }, gateway: { bindHost: '0.0.0.0', port }, model: modelInfo, ...(health.body || {}) }
             });
             for (const client of wss.clients) {
               if (client.readyState === 1) client.send(payload);
             }
           })
           .catch(() => {
-            clearTimeout(timer);
             const payload = JSON.stringify({
               type: 'gateway-status', connId: conn.id,
               data: { running: false }
